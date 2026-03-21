@@ -16,6 +16,9 @@ import {
   summarizeGoal,
   formatDuration,
   estimateRemainingMs,
+  countConsecutiveDiscards,
+  earlyExitThreshold,
+  shouldSkipComparison,
 } from '../utils.ts';
 
 test('clamp helpers enforce bounds', () => {
@@ -114,4 +117,39 @@ test('duration and ETA helpers format human-readable timing', () => {
   assert.equal(estimateRemainingMs(10_000, 0), undefined);
   assert.equal(estimateRemainingMs(10_000, 1), 0);
   assert.equal(Math.round(estimateRemainingMs(10_000, 0.5)), 10_000);
+});
+
+test('countConsecutiveDiscards counts trailing false values', () => {
+  assert.equal(countConsecutiveDiscards([]), 0);
+  assert.equal(countConsecutiveDiscards([true]), 0);
+  assert.equal(countConsecutiveDiscards([false]), 1);
+  assert.equal(countConsecutiveDiscards([true, false, false, false]), 3);
+  assert.equal(countConsecutiveDiscards([false, false, true, false, false]), 2);
+  assert.equal(countConsecutiveDiscards([false, false, false]), 3);
+  assert.equal(countConsecutiveDiscards([true, true, true]), 0);
+  assert.equal(countConsecutiveDiscards([true, false, true]), 0);
+});
+
+test('earlyExitThreshold scales with iteration count', () => {
+  assert.equal(earlyExitThreshold(1), 3);
+  assert.equal(earlyExitThreshold(5), 3);
+  assert.equal(earlyExitThreshold(10), 4);
+  assert.equal(earlyExitThreshold(20), 8);
+  assert.equal(earlyExitThreshold(100), 40);
+});
+
+test('shouldSkipComparison returns true when candidate clearly loses', () => {
+  // Candidate scored well below best
+  assert.equal(shouldSkipComparison(40, 60, true), true);
+  // Candidate scored just below threshold (60 - 10 = 50, candidate is 50 -> not below)
+  assert.equal(shouldSkipComparison(50, 60, true), false);
+  // Candidate scored above best
+  assert.equal(shouldSkipComparison(70, 60, true), false);
+  // Equal score
+  assert.equal(shouldSkipComparison(60, 60, true), false);
+  // Evaluator recommended discard (keep=false)
+  assert.equal(shouldSkipComparison(70, 60, false), true);
+  // Custom threshold
+  assert.equal(shouldSkipComparison(55, 60, true, 3), true);
+  assert.equal(shouldSkipComparison(58, 60, true, 3), false);
 });
