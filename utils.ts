@@ -83,3 +83,33 @@ export function estimateRemainingMs(elapsedMs: number | undefined, progress: num
 	if (!Number.isFinite(progress) || progress <= 0 || progress >= 1) return progress >= 1 ? 0 : undefined;
 	return (elapsedMs / progress) * (1 - progress);
 }
+
+/**
+ * Count how many consecutive discards are at the tail of the attempts list.
+ * Returns 0 if the last attempt was accepted or the list is empty.
+ */
+export function countConsecutiveDiscards(accepted: boolean[]): number {
+	let count = 0;
+	for (let i = accepted.length - 1; i >= 0; i--) {
+		if (accepted[i]) break;
+		count++;
+	}
+	return count;
+}
+
+/**
+ * Determine the max consecutive discards before triggering an early exit.
+ * At least 3, and scales with total iterations (40% of total).
+ */
+export function earlyExitThreshold(totalIterations: number): number {
+	return Math.max(3, Math.ceil(totalIterations * 0.4));
+}
+
+/**
+ * Whether to skip the expensive A/B comparison based on score gap.
+ * Returns true if the candidate is clearly worse than the best.
+ */
+export function shouldSkipComparison(candidateScore: number, bestScore: number, candidateKeep: boolean, threshold = 10): boolean {
+	if (!candidateKeep) return true;
+	return candidateScore < bestScore - threshold;
+}

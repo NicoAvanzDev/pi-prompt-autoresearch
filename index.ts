@@ -1,7 +1,6 @@
-import { spawn } from "node:child_process";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { complete, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -11,12 +10,15 @@ import {
 	clampIterations,
 	clampProgress,
 	computeRelativeImprovement,
+	countConsecutiveDiscards,
+	earlyExitThreshold,
 	formatScore,
 	formatSignedPercent,
 	makeProgressBar,
 	mean,
 	parseAutoresearchArgs,
 	parseBenchmarkArgs,
+	shouldSkipComparison,
 	variance,
 	summarizeGoal,
 	formatDuration,
@@ -262,122 +264,44 @@ function normalizeEvalCases(value: any): EvalCase[] {
 	return cases;
 }
 
-async function writeTempPromptFile(prefix: string, content: string): Promise<{ dir: string; filePath: string }> {
-	const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), `pi-autoresearch-${prefix}-`));
-	const filePath = path.join(dir, `${prefix}.md`);
-	await fs.promises.writeFile(filePath, content, { encoding: "utf-8", mode: 0o600 });
-	return { dir, filePath };
-}
-
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const currentScript = process.argv[1];
-	if (currentScript && fs.existsSync(currentScript)) return { command: process.execPath, args: [currentScript, ...args] };
-	const execName = path.basename(process.execPath).toLowerCase();
-	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
-	if (!isGenericRuntime) return { command: process.execPath, args };
-	return { command: "pi", args };
-}
-
 async function runPiPrompt(
 	ctx: ExtensionContext,
 	prompt: string,
 	systemPrompt?: string,
 	signal?: AbortSignal,
+	maxTokens?: number,
 ): Promise<string> {
-	const args = [
-		"--mode",
-		"json",
-		"-p",
-		"--no-session",
-		"--no-tools",
-		"--no-extensions",
-		"--no-skills",
-		"--no-prompt-templates",
-		"--no-themes",
-	];
-	const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-	if (model) args.push("--model", model);
+	const model = ctx.model;
+	if (!model) throw new Error("No model available. Select a model before running autoresearch.");
+	const apiKey = await ctx.modelRegistry.getApiKey(model);
+	if (!apiKey) throw new Error(`No API key for ${model.provider}/${model.id}.`);
 
-	let tempDir: string | null = null;
-	let tempFile: string | null = null;
-	if (systemPrompt?.trim()) {
-		const temp = await writeTempPromptFile("system", systemPrompt);
-		tempDir = temp.dir;
-		tempFile = temp.filePath;
-		args.push("--append-system-prompt", tempFile);
-	}
-	args.push(prompt);
+	const userMessage: UserMessage = {
+		role: "user",
+		content: [{ type: "text", text: prompt }],
+		timestamp: Date.now(),
+	};
 
-	try {
-		return await new Promise<string>((resolve, reject) => {
-			const invocation = getPiInvocation(args);
-			const proc = spawn(invocation.command, invocation.args, {
-				cwd: ctx.cwd,
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
+	const options: Record<string, unknown> = { apiKey, signal };
+	if (maxTokens !== undefined) options.maxTokens = maxTokens;
 
-			let stdoutBuffer = "";
-			let stderrBuffer = "";
-			let finalAssistantText = "";
-			let wasAborted = false;
+	const response = await complete(
+		model,
+		{ systemPrompt: systemPrompt?.trim() || undefined, messages: [userMessage] },
+		options,
+	);
 
-			const handleLine = (line: string) => {
-				if (!line.trim()) return;
-				let event: any;
-				try {
-					event = JSON.parse(line);
-				} catch {
-					return;
-				}
-				if (event.type === "message_end" && event.message?.role === "assistant") {
-					const parts = Array.isArray(event.message.content) ? event.message.content : [];
-					const text = parts
-						.filter((part: any) => part?.type === "text")
-						.map((part: any) => String(part.text ?? ""))
-						.join("\n")
-						.trim();
-					if (text) finalAssistantText = text;
-				}
-			};
+	if (response.stopReason === "aborted") throw new Error("Autoresearch run was aborted.");
+	if (response.stopReason === "error") throw new Error(response.errorMessage ?? "Model returned an error.");
 
-			proc.stdout.on("data", (data) => {
-				stdoutBuffer += data.toString();
-				const lines = stdoutBuffer.split("\n");
-				stdoutBuffer = lines.pop() ?? "";
-				for (const line of lines) handleLine(line);
-			});
+	const text = response.content
+		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.map((c) => c.text)
+		.join("\n")
+		.trim();
 
-			proc.stderr.on("data", (data) => {
-				stderrBuffer += data.toString();
-			});
-
-			proc.on("error", (error) => reject(error));
-			proc.on("close", (code) => {
-				if (stdoutBuffer.trim()) handleLine(stdoutBuffer);
-				if (wasAborted) return reject(new Error("Autoresearch run was aborted."));
-				if (code !== 0) {
-					return reject(new Error(`pi exited with code ${code}: ${shorten(stderrBuffer || "(no stderr)", 500)}`));
-				}
-				resolve(finalAssistantText.trim());
-			});
-
-			if (signal) {
-				const abort = () => {
-					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
-				};
-				if (signal.aborted) abort();
-				else signal.addEventListener("abort", abort, { once: true });
-			}
-		});
-	} finally {
-		if (tempFile) try { await fs.promises.unlink(tempFile); } catch {}
-		if (tempDir) try { await fs.promises.rmdir(tempDir); } catch {}
-	}
+	if (!text) throw new Error("Model returned empty response.");
+	return text;
 }
 
 function buildHistorySummary(attempts: AttemptRecord[]): string {
@@ -403,7 +327,7 @@ async function generateGoalSummary(ctx: ExtensionContext, goal: string, signal?:
 	].join("\n");
 	const prompt = [`Goal to summarize:`, goal].join("\n");
 	try {
-		const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal);
+		const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal, 256);
 		const cleaned = raw.replace(/\s+/g, " ").trim().replace(/^[-*\"']+|[-*\"']+$/g, "");
 		return summarizeGoal(cleaned || goal);
 	} catch {
@@ -447,7 +371,7 @@ async function generateEvalCases(
 		`Create ${count} eval cases for this prompt-improvement task.`,
 		"Each case should include concrete input and 2-5 expected characteristics for judging output quality.",
 	].join("\n");
-	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal);
+	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal, 4096);
 	return normalizeEvalCases(extractJsonObject(raw)).slice(0, count);
 }
 
@@ -473,17 +397,31 @@ async function runPromptOnEvalCases(
 	onProgress?: (message: string) => void,
 	signal?: AbortSignal,
 	onCaseStart?: (evalCase: EvalCase, index: number, total: number) => Promise<void> | void,
+	concurrency = 3,
 ): Promise<PromptOutput[]> {
-	const outputs: PromptOutput[] = [];
-	for (let i = 0; i < evalCases.length; i++) {
+	const results: PromptOutput[] = new Array(evalCases.length);
+	let completed = 0;
+
+	const runCase = async (i: number) => {
 		throwIfAborted(signal);
 		const evalCase = evalCases[i];
 		await onCaseStart?.(evalCase, i + 1, evalCases.length);
 		onProgress?.(`Running eval case ${i + 1}/${evalCases.length}: ${evalCase.title}`);
 		const output = await runPiPrompt(ctx, buildExecutionPrompt(promptUnderTest, evalCase), undefined, signal);
-		outputs.push({ caseId: evalCase.id, title: evalCase.title, output });
-	}
-	return outputs;
+		results[i] = { caseId: evalCase.id, title: evalCase.title, output };
+		completed++;
+		onProgress?.(`Completed ${completed}/${evalCases.length} eval cases`);
+	};
+
+	const queue = [...evalCases.keys()];
+	const workers = Array.from({ length: Math.min(concurrency, evalCases.length) }, async () => {
+		while (queue.length > 0) {
+			const idx = queue.shift()!;
+			await runCase(idx);
+		}
+	});
+	await Promise.all(workers);
+	return results;
 }
 
 async function evaluatePromptRun(
@@ -527,7 +465,7 @@ async function evaluatePromptRun(
 		}),
 		"Score the prompt on aggregate quality across the whole suite, not just one case.",
 	].join("\n");
-	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal);
+	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal, 4096);
 	return normalizePromptEvaluation(extractJsonObject(raw), evalCases);
 }
 
@@ -571,7 +509,7 @@ async function comparePromptRuns(
 			];
 		}),
 	].join("\n");
-	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal);
+	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal, 4096);
 	return normalizeComparatorResult(extractJsonObject(raw), evalCases);
 }
 
@@ -669,7 +607,7 @@ async function generateCandidate(
 		"",
 		"Produce a stronger prompt candidate that improves robustness across the full eval suite, not just one example.",
 	].join("\n");
-	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal);
+	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal, 8192);
 	return normalizeGenerator(extractJsonObject(raw));
 }
 
@@ -858,9 +796,27 @@ async function runAutoresearch(
 			currentCaseTitle: undefined,
 			message: `Iteration ${iteration}/${iterations}: blind A/B compare...`,
 		});
-		callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: blind A/B compare...`);
 		const previousBestScore = best.evaluation.score;
-		const comparison = await comparePromptRuns(ctx, goal, evalCases, best, candidateRun, signal);
+
+		let comparison: ComparatorResult;
+		if (shouldSkipComparison(candidateRun.evaluation.score, best.evaluation.score, candidateRun.evaluation.keep)) {
+			callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: skipping A/B (candidate clearly worse).`);
+			comparison = {
+				winner: "A",
+				keepCandidate: false,
+				summary: `Skipped: candidate scored ${candidateRun.evaluation.score.toFixed(1)} vs best ${best.evaluation.score.toFixed(1)}`,
+				reasons: ["Score gap too large or evaluator recommended discard"],
+				caseDecisions: evalCases.map((ec) => ({
+					caseId: ec.id,
+					title: ec.title,
+					winner: "A" as const,
+					reason: "Comparison skipped",
+				})),
+			};
+		} else {
+			callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: blind A/B compare...`);
+			comparison = await comparePromptRuns(ctx, goal, evalCases, best, candidateRun, signal);
+		}
 		const accepted = candidateRun.evaluation.keep && candidateRun.evaluation.score > best.evaluation.score && comparison.keepCandidate;
 
 		attempts.push({
@@ -899,6 +855,18 @@ async function runAutoresearch(
 				? `Iteration ${iteration}/${iterations}: kept candidate (${best.evaluation.score.toFixed(1)}).`
 				: `Iteration ${iteration}/${iterations}: discarded candidate (${candidateRun.evaluation.score.toFixed(1)}).`,
 		});
+
+		// Early exit when optimization has plateaued
+		const consecutiveDiscards = countConsecutiveDiscards(attempts.map((a) => a.accepted));
+		const exitThreshold = earlyExitThreshold(iterations);
+		if (consecutiveDiscards >= exitThreshold && iteration < iterations) {
+			callbacks?.onProgress?.(`Early exit after ${consecutiveDiscards} consecutive discards (threshold: ${exitThreshold}).`);
+			await callbacks?.onStateChange?.({
+				phase: "early-exit",
+				message: `Early exit: ${consecutiveDiscards} consecutive discards suggest plateau reached.`,
+			});
+			break;
+		}
 	}
 
 	await callbacks?.onStateChange?.({

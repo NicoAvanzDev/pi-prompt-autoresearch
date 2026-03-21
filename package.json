@@ -21,6 +21,10 @@
   ],
   "files": [
     "index.ts",
+    "utils.ts",
+    "job-state.ts",
+    "progress-file.ts",
+    "prompt-file.ts",
     "README.md"
   ],
   "pi": {
@@ -29,6 +33,7 @@
     ]
   },
   "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "*"
