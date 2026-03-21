@@ -1,6 +1,14 @@
 # pi prompt autoresearch
 
-A pi extension that loops on a prompt, executes each candidate, evaluates the actual result, and decides whether to keep or discard each iteration.
+A pi extension that improves prompts with a real eval loop:
+
+- generates an eval suite
+- runs each prompt candidate across the suite
+- scores the actual outputs case-by-case
+- aggregates the score
+- keeps or discards each iteration
+
+That is much closer to a benchmark-style eval workflow than a single one-off judge call.
 
 ## Repo layout
 
@@ -36,25 +44,20 @@ From the public git repo:
 pi install git:github.com/NicoAvanzDev/pi-prompt-autoresearch
 ```
 
-Because `package.json` contains a `pi` manifest, pi will load:
+## How the eval works
 
-- `./index.ts`
+For each `/autoresearch` run, the extension:
 
-## What it does
+1. generates a small eval suite for the user goal
+2. uses the goal itself as the baseline prompt
+3. runs the baseline prompt on every eval case
+4. scores each case and computes an aggregate score
+5. generates a revised prompt candidate
+6. runs that candidate on every eval case
+7. evaluates the candidate across the full suite
+8. keeps the candidate only if the eval says `keep` **and** the aggregate score beats the current best
 
-This extension runs an autoresearch loop for prompts:
-
-1. uses the user goal as the baseline prompt
-2. executes that prompt in a fresh pi subprocess
-3. evaluates the actual output
-4. generates a revised prompt candidate
-5. executes the candidate
-6. evaluates the candidate against the current best result
-7. keeps or discards the iteration
-8. repeats for a fixed number of iterations
-
-By default it runs **10 iterations**.
-Users can increase that up to **100**.
+So the keep/discard decision is based on a multi-case eval suite, not just one generated answer.
 
 ## Commands
 
@@ -95,7 +98,7 @@ Parameters:
 
 ## Notes
 
-- it evaluates the **actual output** of each prompt candidate
-- it only keeps a candidate when evaluation says keep **and** the score beats the current best
+- default iterations: **10**
+- users can increase iterations up to **100**
+- the extension evaluates **actual outputs** on an eval suite
 - in interactive mode, `/autoresearch` copies the best prompt into the editor when finished
-- the package is set up in the common pi extension repo style: root `package.json` + root `index.ts`
