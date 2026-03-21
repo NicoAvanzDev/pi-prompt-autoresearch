@@ -58,7 +58,7 @@ LLM-callable tools:
   - footer/status summary
   - milestone updates in chat
   - background job control for autoresearch
-  - elapsed time / ETA display
+  - elapsed time / ETA display with live UI refresh while running
   - current case progress and current case title
   - recovery progress file kept up to date in cwd
 

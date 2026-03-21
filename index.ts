@@ -922,6 +922,8 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 	let defaultIterations = DEFAULT_ITERATIONS;
 	let latestSnapshot: JobSnapshot | null = null;
 	let activeJob: ActiveJob | null = null;
+	let liveRenderTimer: NodeJS.Timeout | null = null;
+	let lastUiContext: ExtensionContext | null = null;
 
 	const buildWidgetLines = (theme: any, snapshot: JobSnapshot, width: number): string[] => {
 		const statusColor =
@@ -937,7 +939,8 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		);
 		const caseProgressValue = snapshot.totalCases > 0 ? snapshot.currentCaseIndex / Math.max(1, snapshot.totalCases) : 0;
 		const caseProgress = snapshot.totalCases > 0 ? `${snapshot.currentCaseIndex}/${snapshot.totalCases}` : "—";
-		const elapsedMs = snapshot.updatedAt - snapshot.startedAt;
+		const now = snapshot.status === "running" || snapshot.status === "pause-requested" ? Date.now() : snapshot.updatedAt;
+		const elapsedMs = now - snapshot.startedAt;
 		const etaMs = estimateRemainingMs(elapsedMs, overallProgress);
 		const lines: string[] = [];
 		lines.push(theme.fg("accent", theme.bold("Prompt autoresearch")));
@@ -973,12 +976,16 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 	};
 
 	const renderSnapshotIntoUi = (ctx: ExtensionContext, snapshot: JobSnapshot | null) => {
+		lastUiContext = ctx;
 		if (!ctx.hasUI) return;
 		if (!snapshot) {
+			stopLiveRenderTimer();
 			ctx.ui.setStatus("prompt-autoresearch", "");
 			ctx.ui.setWidget("prompt-autoresearch-progress", undefined);
 			return;
 		}
+		if (snapshot.status === "running" || snapshot.status === "pause-requested") ensureLiveRenderTimer();
+		else stopLiveRenderTimer();
 		ctx.ui.setStatus("prompt-autoresearch", getStatusText(snapshot));
 		ctx.ui.setWidget("prompt-autoresearch-progress", (_tui, theme) => ({
 			render: (width: number) => buildWidgetLines(theme, snapshot, width),
@@ -994,6 +1001,21 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		const promptPath = path.join(ctx.cwd, PROMPT_FILE_NAME);
 		await fs.promises.writeFile(progressPath, renderProgressFile(latestSnapshot, ctx.cwd), "utf-8");
 		await fs.promises.writeFile(promptPath, renderPromptFile(latestSnapshot), "utf-8");
+	};
+
+	const stopLiveRenderTimer = () => {
+		if (!liveRenderTimer) return;
+		clearInterval(liveRenderTimer);
+		liveRenderTimer = null;
+	};
+
+	const ensureLiveRenderTimer = () => {
+		if (liveRenderTimer) return;
+		liveRenderTimer = setInterval(() => {
+			if (!latestSnapshot || !lastUiContext) return;
+			if (latestSnapshot.status !== "running" && latestSnapshot.status !== "pause-requested") return;
+			renderSnapshotIntoUi(lastUiContext, latestSnapshot);
+		}, 1000);
 	};
 
 	const sendLifecycleMessage = (snapshot: JobSnapshot, kind: string, extra?: Record<string, unknown>) => {
@@ -1085,6 +1107,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 	pi.on("session_fork", async (_event, ctx) => restoreConfig(ctx));
 	pi.on("session_tree", async (_event, ctx) => restoreConfig(ctx));
 	pi.on("session_shutdown", async () => {
+		stopLiveRenderTimer();
 		if (!activeJob) return;
 		activeJob.pauseRequested = false;
 		activeJob.paused = false;

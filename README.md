@@ -127,7 +127,7 @@ The interactive extension now shows:
 - a persistent progress widget above the editor
 - an AI-generated goal summary
 - iteration and case progress
-- elapsed time and ETA
+- elapsed time and ETA, refreshed live while a job is running
 - current score, best score, and percentage improvement vs baseline
 - milestone updates in chat when a new best prompt is found, or when the job is paused/resumed/completed
 
