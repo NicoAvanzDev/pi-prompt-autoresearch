@@ -2,35 +2,46 @@
   "name": "pi-prompt-autoresearch",
   "version": "0.1.0",
   "description": "A pi extension that iteratively improves prompts with execution-based evaluation and keep/discard decisions.",
-  "type": "module",
+  "keywords": [
+    "autoresearch",
+    "pi-extension",
+    "pi-package",
+    "prompt-engineering",
+    "prompt-optimization"
+  ],
+  "homepage": "https://github.com/NicoAvanzDev/pi-prompt-autoresearch#readme",
+  "bugs": {
+    "url": "https://github.com/NicoAvanzDev/pi-prompt-autoresearch/issues"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/NicoAvanzDev/pi-prompt-autoresearch.git"
   },
-  "homepage": "https://github.com/NicoAvanzDev/pi-prompt-autoresearch#readme",
-  "bugs": {
-    "url": "https://github.com/NicoAvanzDev/pi-prompt-autoresearch/issues"
-  },
-  "keywords": [
-    "pi-package",
-    "pi-extension",
-    "prompt-optimization",
-    "autoresearch",
-    "prompt-engineering"
-  ],
   "files": [
     "index.ts",
+    "types.ts",
+    "normalize.ts",
+    "format.ts",
     "utils.ts",
     "job-state.ts",
-    "progress-file.ts",
     "prompt-file.ts",
     "README.md"
   ],
-  "pi": {
-    "extensions": [
-      "./index.ts"
-    ]
+  "type": "module",
+  "scripts": {
+    "build": "echo 'nothing to build'",
+    "test": "vitest run",
+    "lint": "oxlint",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
+    "check": "vitest run && oxlint && oxfmt --check .",
+    "prepublishOnly": "npm pack --dry-run"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.41.0",
+    "oxlint": "^1.56.0",
+    "vitest": "^4.1.0"
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",
@@ -38,10 +49,9 @@
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "*"
   },
-  "scripts": {
-    "build": "echo 'nothing to build'",
-    "check": "node --test",
-    "test": "node --test",
-    "prepublishOnly": "npm pack --dry-run"
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }
