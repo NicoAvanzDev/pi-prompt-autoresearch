@@ -411,6 +411,23 @@ async function generateGoalSummary(ctx: ExtensionContext, goal: string, signal?:
 	}
 }
 
+async function generateInitialPrompt(ctx: ExtensionContext, goal: string, signal?: AbortSignal): Promise<string> {
+	const systemPrompt = [
+		"You are an expert prompt engineer.",
+		"Given a user goal, create the best possible initial prompt to accomplish that goal.",
+		"Return only the prompt text itself.",
+		"Do not add commentary, markdown fences, or explanations.",
+	].join("\n");
+	const prompt = [
+		"Create an initial prompt for this goal:",
+		goal,
+	].join("\n\n");
+	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal);
+	const candidate = raw.trim();
+	if (!candidate) throw new Error("Initial prompt generation returned empty output.");
+	return candidate;
+}
+
 async function generateEvalCases(
 	ctx: ExtensionContext,
 	goal: string,
@@ -725,8 +742,16 @@ async function runAutoresearch(
 	callbacks?: AutoresearchCallbacks,
 	signal?: AbortSignal,
 ): Promise<RunSummary> {
-	const baselinePrompt = goal.trim();
-	if (!baselinePrompt) throw new Error("Goal cannot be empty.");
+	if (!goal.trim()) throw new Error("Goal cannot be empty.");
+
+	callbacks?.onProgress?.(`Generating initial prompt...`);
+	await callbacks?.beforeStep?.();
+	const baselinePrompt = await generateInitialPrompt(ctx, goal, signal);
+	await callbacks?.onStateChange?.({
+		phase: "initial-prompt",
+		bestPrompt: baselinePrompt,
+		message: `Generated initial prompt. Designing eval suite...`,
+	});
 
 	callbacks?.onProgress?.(`Designing eval suite (${evalCaseCount} cases)...`);
 	await callbacks?.beforeStep?.();
@@ -768,6 +793,8 @@ async function runAutoresearch(
 		bestScore: baseline.evaluation.score,
 		bestPrompt: baseline.prompt,
 		currentScore: baseline.evaluation.score,
+		currentCandidateVsBaselinePct: 0,
+		currentCandidateVsBestPct: 0,
 		currentCaseTitle: undefined,
 		overallImprovementPct: 0,
 		message: `Baseline complete (${baseline.evaluation.score.toFixed(1)}).`,
@@ -781,6 +808,8 @@ async function runAutoresearch(
 			phase: "generate-candidate",
 			currentCaseIndex: 0,
 			currentCaseTitle: undefined,
+			currentCandidateVsBaselinePct: undefined,
+			currentCandidateVsBestPct: undefined,
 			message: `Iteration ${iteration}/${iterations}: generating candidate...`,
 		});
 		callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: generating candidate...`);
@@ -816,6 +845,8 @@ async function runAutoresearch(
 			currentIteration: iteration,
 			phase: "score-candidate",
 			currentScore: candidateRun.evaluation.score,
+			currentCandidateVsBaselinePct: computeRelativeImprovement(candidateRun.evaluation.score, baseline.evaluation.score),
+			currentCandidateVsBestPct: computeRelativeImprovement(candidateRun.evaluation.score, best.evaluation.score),
 			currentCaseTitle: undefined,
 			message: `Iteration ${iteration}/${iterations}: candidate scored ${candidateRun.evaluation.score.toFixed(1)}.`,
 		});
@@ -854,6 +885,8 @@ async function runAutoresearch(
 			currentIteration: iteration,
 			phase: accepted ? "kept-candidate" : "discarded-candidate",
 			currentScore: candidateRun.evaluation.score,
+			currentCandidateVsBaselinePct: computeRelativeImprovement(candidateRun.evaluation.score, baseline.evaluation.score),
+			currentCandidateVsBestPct: computeRelativeImprovement(candidateRun.evaluation.score, previousBestScore),
 			bestScore: best.evaluation.score,
 			bestPrompt: best.prompt,
 			previousBestScore,
@@ -875,6 +908,8 @@ async function runAutoresearch(
 		totalCases: evalCases.length,
 		currentCaseTitle: undefined,
 		currentScore: best.evaluation.score,
+		currentCandidateVsBaselinePct: computeRelativeImprovement(best.evaluation.score, baseline.evaluation.score),
+		currentCandidateVsBestPct: 0,
 		bestScore: best.evaluation.score,
 		bestPrompt: best.prompt,
 		overallImprovementPct: computeRelativeImprovement(best.evaluation.score, baseline.evaluation.score),
@@ -925,7 +960,10 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 			`${theme.fg("muted", "Baseline")}: ${formatScore(snapshot.baselineScore)}  ${theme.fg("muted", "Current")}: ${formatScore(snapshot.currentScore)}  ${theme.fg("muted", "Best")}: ${formatScore(snapshot.bestScore)}`,
 		);
 		lines.push(
-			`${theme.fg("muted", "Overall gain")}: ${theme.fg("success", formatSignedPercent(snapshot.overallImprovementPct))}  ${theme.fg("muted", "Last accepted gain")}: ${theme.fg("success", formatSignedPercent(snapshot.lastAcceptedGainPct))}`,
+			`${theme.fg("muted", "Best gain")}: ${theme.fg("success", formatSignedPercent(snapshot.overallImprovementPct))}  ${theme.fg("muted", "Last accepted")}: ${theme.fg("success", formatSignedPercent(snapshot.lastAcceptedGainPct))}`,
+		);
+		lines.push(
+			`${theme.fg("muted", "Current vs baseline")}: ${theme.fg("accent", formatSignedPercent(snapshot.currentCandidateVsBaselinePct))}  ${theme.fg("muted", "Current vs best")}: ${theme.fg("accent", formatSignedPercent(snapshot.currentCandidateVsBestPct))}`,
 		);
 		lines.push(
 			`${theme.fg("muted", "Accepted")}: ${snapshot.acceptedCount}  ${theme.fg("muted", "Discarded")}: ${snapshot.discardedCount}`,
@@ -1036,7 +1074,8 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 						: "accent";
 		const lines = [
 			`${theme.fg(color, theme.bold(`[${kind.toUpperCase()}]`))} ${message.content}`,
-			`${theme.fg("muted", "iter")}: ${details.currentIteration ?? 0}/${details.totalIterations ?? 0}  ${theme.fg("muted", "best")}: ${formatScore(details.bestScore)}  ${theme.fg("muted", "gain")}: ${formatSignedPercent(details.overallImprovementPct)}`,
+			`${theme.fg("muted", "iter")}: ${details.currentIteration ?? 0}/${details.totalIterations ?? 0}  ${theme.fg("muted", "best")}: ${formatScore(details.bestScore)}  ${theme.fg("muted", "best gain")}: ${formatSignedPercent(details.overallImprovementPct)}`,
+			`${theme.fg("muted", "current vs best")}: ${formatSignedPercent(details.currentCandidateVsBestPct)}  ${theme.fg("muted", "current vs baseline")}: ${formatSignedPercent(details.currentCandidateVsBaselinePct)}`,
 		];
 		return new Text(lines.join("\n"), 0, 0);
 	});
@@ -1071,7 +1110,6 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 			const snapshot: JobSnapshot = createInitialJobSnapshot({
 				goal: parsed.goal,
 				goalSummary,
-				bestPrompt: parsed.goal.trim(),
 				iterations: parsed.iterations,
 				evalCaseCount: DEFAULT_EVAL_CASES,
 			});

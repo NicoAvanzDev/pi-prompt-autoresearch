@@ -13,7 +13,7 @@ export function renderPromptFile(snapshot: JobSnapshot): string {
 	lines.push('');
 	lines.push('---');
 	lines.push('');
-	lines.push(snapshot.bestPrompt?.trim() || snapshot.goal.trim() || '_No prompt captured yet._');
+	lines.push(snapshot.bestPrompt?.trim() || '_No prompt captured yet._');
 	lines.push('');
 	return lines.join('\n');
 }

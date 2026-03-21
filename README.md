@@ -49,9 +49,9 @@ pi install git:github.com/NicoAvanzDev/pi-prompt-autoresearch
 
 For each `/autoresearch` run, the extension:
 
-1. generates a small eval suite for the user goal
-2. uses the goal itself as the baseline prompt
-3. runs the baseline prompt on every eval case
+1. generates an initial prompt from the user goal
+2. generates a small eval suite for the user goal
+3. runs the initial prompt on every eval case
 4. scores each case and computes an aggregate score
 5. generates a revised prompt candidate
 6. runs that candidate on every eval case

@@ -18,6 +18,8 @@ export interface JobSnapshot {
 	bestPrompt?: string;
 	baselineScore?: number;
 	currentScore?: number;
+	currentCandidateVsBaselinePct?: number;
+	currentCandidateVsBestPct?: number;
 	bestScore?: number;
 	previousBestScore?: number;
 	lastAcceptedGainPct?: number;

@@ -8,6 +8,7 @@ This repo is a **pi extension** for prompt optimization / prompt autoresearch.
 
 Main behavior:
 - runs iterative prompt improvement loops
+- generates an initial prompt from the user goal before optimization starts
 - generates eval cases
 - scores prompt candidates
 - performs blind A/B comparisons
