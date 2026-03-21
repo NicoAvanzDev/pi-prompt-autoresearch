@@ -30,10 +30,10 @@ From npm after publishing:
 pi install npm:pi-prompt-autoresearch
 ```
 
-From a git repo later:
+From the public git repo:
 
 ```bash
-pi install git:github.com/USER/REPO
+pi install git:github.com/NicoAvanzDev/pi-prompt-autoresearch
 ```
 
 Because `package.json` contains a `pi` manifest, pi will load:

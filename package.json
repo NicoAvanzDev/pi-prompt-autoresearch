@@ -4,6 +4,14 @@
   "description": "A pi extension that iteratively improves prompts with execution-based evaluation and keep/discard decisions.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NicoAvanzDev/pi-prompt-autoresearch.git"
+  },
+  "homepage": "https://github.com/NicoAvanzDev/pi-prompt-autoresearch#readme",
+  "bugs": {
+    "url": "https://github.com/NicoAvanzDev/pi-prompt-autoresearch/issues"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
