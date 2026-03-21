@@ -7,6 +7,7 @@ Guidance for agents working in this repository.
 This repo is a **pi extension** for prompt optimization / prompt autoresearch.
 
 Main behavior:
+
 - runs iterative prompt improvement loops
 - generates an initial prompt from the user goal before optimization starts
 - generates eval cases
@@ -21,18 +22,21 @@ Main behavior:
 ## Important files
 
 - `index.ts` — main extension entrypoint and pi runtime wiring
+- `types.ts` — shared interfaces and type definitions
+- `normalize.ts` — JSON parsing, normalization, and clamping helpers
+- `format.ts` — prompt/summary message builders
 - `utils.ts` — pure helper utilities; preferred place for small testable logic
 - `job-state.ts` — pure job snapshot / lifecycle transitions
 - `prompt-file.ts` — exports the prompt file name constant
+- `vitest.config.ts` — Vitest test runner configuration
 - `README.md` — user-facing usage docs
-- `test/utils.test.mjs` — tests for helper logic
-- `test/job-state.test.mjs` — tests for job lifecycle/state logic
-- `test/prompt-file.test.mjs` — tests for prompt file constant
-- `package.json` — package metadata and test scripts
+- `test/*.test.ts` — unit tests (Vitest)
+- `package.json` — package metadata and scripts
 
 ## Commands and tools
 
 Interactive commands:
+
 - `/autoresearch`
 - `/autoresearch-benchmark`
 - `/autoresearch-iterations`
@@ -42,6 +46,7 @@ Interactive commands:
 - `/autoresearch-status`
 
 LLM-callable tools:
+
 - `run_prompt_autoresearch`
 - `benchmark_prompt_autoresearch`
 
@@ -68,15 +73,42 @@ Run tests with:
 npm test
 ```
 
-Current test stack:
-- Node built-in test runner (`node --test`)
-- `.mjs` test files
-- no external test framework required
+Test stack:
+
+- [Vitest](https://vitest.dev/) test runner
+- `.test.ts` files in `test/`
+- `describe`/`it`/`expect` API
 
 When adding logic:
+
 - add/extend unit tests for pure helpers
 - add/extend state-transition tests for job lifecycle behavior
 - avoid introducing untestable logic when a pure function extraction is easy
+
+## Linting
+
+Lint with [oxlint](https://oxc.rs/docs/guide/usage/linter.html) (zero-config):
+
+```bash
+npm run lint
+```
+
+## Formatting
+
+Format with [oxfmt](https://oxc.rs/docs/guide/usage/formatter.html) (Prettier-compatible, zero-config):
+
+```bash
+npm run fmt          # format in place
+npm run fmt:check    # check only (CI)
+```
+
+## Full check
+
+Run tests, linting, and formatting check together:
+
+```bash
+npm run check
+```
 
 ## Editing guidance
 
@@ -85,11 +117,12 @@ When adding logic:
 - Update `README.md` when user-facing commands or behavior change.
 - If introducing new state transitions or snapshot fields, update both:
   - `job-state.ts`
-  - tests in `test/job-state.test.mjs`
+  - tests in `test/job-state.test.ts`
 
 ## Notes about runtime
 
 This package is intended to run inside pi, so local validation is mostly:
+
 - unit tests
 - careful review of TypeScript changes
 - keeping side effects localized in `index.ts`
