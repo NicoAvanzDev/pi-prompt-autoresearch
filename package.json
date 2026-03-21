@@ -1,0 +1,33 @@
+{
+  "name": "pi-prompt-autoresearch",
+  "version": "0.1.0",
+  "description": "A pi extension that iteratively improves prompts with execution-based evaluation and keep/discard decisions.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prompt-optimization",
+    "autoresearch",
+    "prompt-engineering"
+  ],
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "scripts": {
+    "build": "echo 'nothing to build'",
+    "check": "echo 'nothing to check'",
+    "prepublishOnly": "npm pack --dry-run"
+  }
+}
