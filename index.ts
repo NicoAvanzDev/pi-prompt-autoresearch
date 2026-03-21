@@ -37,231 +37,41 @@ import {
 	type JobSnapshot,
 } from "./job-state.ts";
 import { PROMPT_FILE_NAME } from "./prompt-file.ts";
+import type {
+	ActiveJob,
+	AttemptRecord,
+	AutoresearchCallbacks,
+	BenchmarkRun,
+	BenchmarkSummary,
+	ComparatorResult,
+	EvalCase,
+	PromptEvaluation,
+	PromptOutput,
+	PromptRun,
+	RunSummary,
+	RunToolDetails,
+} from "./types.ts";
+import {
+	countAttemptResults,
+	extractJsonObject,
+	normalizeComparatorResult,
+	normalizeEvalCases,
+	normalizeGenerator,
+	normalizePromptEvaluation,
+	throwIfAborted,
+} from "./normalize.ts";
+import {
+	buildBenchmarkSummaryMessage,
+	buildExecutionPrompt,
+	buildHistorySummary,
+	buildRunSummaryMessage,
+	shorten,
+} from "./format.ts";
 
 const DEFAULT_ITERATIONS = 10;
 const DEFAULT_EVAL_CASES = 5;
 const DEFAULT_BENCHMARK_RUNS = 3;
-const RESULT_PREVIEW_LIMIT = 1200;
-const HISTORY_PREVIEW_LIMIT = 6;
-
-interface GeneratorResult {
-	candidatePrompt: string;
-	changeSummary: string;
-	hypothesis: string;
-}
-
-interface EvalCase {
-	id: string;
-	title: string;
-	input: string;
-	expectedCharacteristics: string[];
-}
-
-interface CaseEvaluation {
-	caseId: string;
-	title: string;
-	score: number;
-	summary: string;
-	strengths: string[];
-	weaknesses: string[];
-}
-
-interface PromptEvaluation {
-	score: number;
-	keep: boolean;
-	decision: "keep" | "discard";
-	summary: string;
-	strengths: string[];
-	weaknesses: string[];
-	suggestions: string[];
-	caseEvaluations: CaseEvaluation[];
-}
-
-interface ComparatorCaseDecision {
-	caseId: string;
-	title: string;
-	winner: "A" | "B" | "tie";
-	reason: string;
-}
-
-interface ComparatorResult {
-	winner: "A" | "B" | "tie";
-	keepCandidate: boolean;
-	summary: string;
-	reasons: string[];
-	caseDecisions: ComparatorCaseDecision[];
-}
-
-interface AttemptRecord {
-	iteration: number;
-	candidatePrompt: string;
-	evaluation: PromptEvaluation;
-	comparison: ComparatorResult;
-	accepted: boolean;
-	changeSummary: string;
-	hypothesis: string;
-}
-
-interface PromptOutput {
-	caseId: string;
-	title: string;
-	output: string;
-}
-
-interface PromptRun {
-	prompt: string;
-	outputs: PromptOutput[];
-	evaluation: PromptEvaluation;
-}
-
-interface BenchmarkRun {
-	runIndex: number;
-	score: number;
-	summary: string;
-}
-
-interface BenchmarkSummary {
-	goal: string;
-	prompt: string;
-	evalCases: EvalCase[];
-	runs: BenchmarkRun[];
-	meanScore: number;
-	minScore: number;
-	maxScore: number;
-	variance: number;
-	stddev: number;
-}
-
-interface RunSummary {
-	goal: string;
-	iterations: number;
-	evalCases: EvalCase[];
-	baseline: PromptRun;
-	best: PromptRun;
-	attempts: AttemptRecord[];
-}
-
-interface RunToolDetails extends RunSummary {
-	acceptedCount: number;
-	discardedCount: number;
-}
-
-interface ActiveJob {
-	snapshot: JobSnapshot;
-	abortController: AbortController;
-	pauseRequested: boolean;
-	paused: boolean;
-	resumeResolvers: Array<() => void>;
-}
-
-function shorten(text: string, maxLength = RESULT_PREVIEW_LIMIT): string {
-	if (text.length <= maxLength) return text;
-	return `${text.slice(0, maxLength)}\n\n[truncated ${text.length - maxLength} chars]`;
-}
-
-function trimJsonFence(text: string): string {
-	const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-	if (fenced?.[1]) return fenced[1].trim();
-	return text.trim();
-}
-
-function extractJsonObject(text: string): any {
-	const cleaned = trimJsonFence(text);
-	try {
-		return JSON.parse(cleaned);
-	} catch {
-		const start = cleaned.indexOf("{");
-		const end = cleaned.lastIndexOf("}");
-		if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
-		throw new Error(`Could not parse JSON from model output:\n${shorten(cleaned, 500)}`);
-	}
-}
-
-function asStringArray(value: unknown): string[] {
-	if (!Array.isArray(value)) return [];
-	return value.map((item) => String(item));
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-	if (signal?.aborted) throw new Error("Autoresearch run was aborted.");
-}
-
-function normalizeCaseEvaluation(value: any, fallbackId: string, fallbackTitle: string): CaseEvaluation {
-	const scoreNumber = Number(value?.score);
-	return {
-		caseId: String(value?.caseId ?? fallbackId),
-		title: String(value?.title ?? fallbackTitle),
-		score: Number.isFinite(scoreNumber) ? Math.max(0, Math.min(100, scoreNumber)) : 0,
-		summary: String(value?.summary ?? "No summary provided."),
-		strengths: asStringArray(value?.strengths),
-		weaknesses: asStringArray(value?.weaknesses),
-	};
-}
-
-function normalizePromptEvaluation(value: any, cases: EvalCase[]): PromptEvaluation {
-	const scoreNumber = Number(value?.score);
-	const keep = Boolean(value?.keep);
-	const caseValues = Array.isArray(value?.caseEvaluations) ? value.caseEvaluations : [];
-	const caseEvaluations = cases.map((evalCase, index) =>
-		normalizeCaseEvaluation(caseValues[index], evalCase.id, evalCase.title),
-	);
-	return {
-		score: Number.isFinite(scoreNumber) ? Math.max(0, Math.min(100, scoreNumber)) : 0,
-		keep,
-		decision: keep ? "keep" : "discard",
-		summary: String(value?.summary ?? "No summary provided."),
-		strengths: asStringArray(value?.strengths),
-		weaknesses: asStringArray(value?.weaknesses),
-		suggestions: asStringArray(value?.suggestions),
-		caseEvaluations,
-	};
-}
-
-function normalizeComparatorResult(value: any, cases: EvalCase[]): ComparatorResult {
-	const rawCaseDecisions = Array.isArray(value?.caseDecisions) ? value.caseDecisions : [];
-	const caseDecisions = cases.map((evalCase, index) => {
-		const raw = rawCaseDecisions[index] ?? {};
-		const winner = raw?.winner === "A" || raw?.winner === "B" || raw?.winner === "tie" ? raw.winner : "tie";
-		return {
-			caseId: String(raw?.caseId ?? evalCase.id),
-			title: String(raw?.title ?? evalCase.title),
-			winner,
-			reason: String(raw?.reason ?? "No reason provided."),
-		};
-	});
-	const winner = value?.winner === "A" || value?.winner === "B" || value?.winner === "tie" ? value.winner : "tie";
-	return {
-		winner,
-		keepCandidate: winner === "B",
-		summary: String(value?.summary ?? "No summary provided."),
-		reasons: asStringArray(value?.reasons),
-		caseDecisions,
-	};
-}
-
-function normalizeGenerator(value: any): GeneratorResult {
-	const candidatePrompt = String(value?.candidatePrompt ?? "").trim();
-	if (!candidatePrompt) throw new Error("Generator returned an empty candidatePrompt.");
-	return {
-		candidatePrompt,
-		changeSummary: String(value?.changeSummary ?? "No change summary provided."),
-		hypothesis: String(value?.hypothesis ?? "No hypothesis provided."),
-	};
-}
-
-function normalizeEvalCases(value: any): EvalCase[] {
-	const rawCases = Array.isArray(value?.cases) ? value.cases : [];
-	const cases = rawCases
-		.map((item: any, index: number) => ({
-			id: String(item?.id ?? `case-${index + 1}`),
-			title: String(item?.title ?? `Case ${index + 1}`),
-			input: String(item?.input ?? "").trim(),
-			expectedCharacteristics: asStringArray(item?.expectedCharacteristics),
-		}))
-		.filter((item: EvalCase) => item.input.length > 0);
-	if (cases.length === 0) throw new Error("No valid eval cases were generated.");
-	return cases;
-}
+const PERSISTENT_PHASES: ReadonlySet<string> = new Set(["iteration-setup", "kept-candidate", "discarded-candidate", "completed"]);
 
 async function runPiPrompt(
 	ctx: ExtensionContext,
@@ -301,21 +111,6 @@ async function runPiPrompt(
 
 	if (!text) throw new Error("Model returned empty response.");
 	return text;
-}
-
-function buildHistorySummary(attempts: AttemptRecord[]): string {
-	if (attempts.length === 0) return "No prior iterations yet.";
-	return attempts
-		.slice(-HISTORY_PREVIEW_LIMIT)
-		.map((attempt) => [
-			`Iteration ${attempt.iteration}: ${attempt.accepted ? "accepted" : "discarded"}`,
-			`Score: ${attempt.evaluation.score.toFixed(1)}`,
-			`Comparison winner: ${attempt.comparison.winner}`,
-			`Change: ${attempt.changeSummary}`,
-			`Hypothesis: ${attempt.hypothesis}`,
-			`Evaluation: ${attempt.evaluation.summary}`,
-		].join("\n"))
-		.join("\n\n");
 }
 
 async function generateGoalSummary(ctx: ExtensionContext, goal: string, signal?: AbortSignal): Promise<string> {
@@ -372,21 +167,6 @@ async function generateEvalCases(
 	].join("\n");
 	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal, 4096);
 	return normalizeEvalCases(extractJsonObject(raw)).slice(0, count);
-}
-
-function buildExecutionPrompt(promptUnderTest: string, evalCase: EvalCase): string {
-	return [
-		"You are being evaluated.",
-		"Apply the PROMPT UNDER TEST to the TEST INPUT and produce the response that prompt would ideally elicit.",
-		"Do not discuss the evaluation itself.",
-		"",
-		"PROMPT UNDER TEST:",
-		promptUnderTest,
-		"",
-		`TEST CASE: ${evalCase.title}`,
-		"TEST INPUT:",
-		evalCase.input,
-	].join("\n");
 }
 
 async function runPromptOnEvalCases(
@@ -610,67 +390,6 @@ async function generateCandidate(
 	return normalizeGenerator(extractJsonObject(raw));
 }
 
-function buildRunSummaryMessage(summary: RunSummary): string {
-	const accepted = summary.attempts.filter((attempt) => attempt.accepted).length;
-	const discarded = summary.attempts.length - accepted;
-	const lines: string[] = [];
-	lines.push("# Prompt autoresearch result");
-	lines.push("");
-	lines.push(`Goal: ${summary.goal}`);
-	lines.push(`Iterations: ${summary.iterations}`);
-	lines.push(`Eval cases: ${summary.evalCases.length}`);
-	lines.push(`Baseline score: ${summary.baseline.evaluation.score.toFixed(1)}`);
-	lines.push(`Best score: ${summary.best.evaluation.score.toFixed(1)}`);
-	lines.push(`Accepted: ${accepted}`);
-	lines.push(`Discarded: ${discarded}`);
-	lines.push("");
-	lines.push("## Eval suite");
-	for (const evalCase of summary.evalCases) {
-		const caseEval = summary.best.evaluation.caseEvaluations.find((item) => item.caseId === evalCase.id);
-		lines.push(`- ${evalCase.title}: ${caseEval?.score.toFixed(1) ?? "0.0"}`);
-	}
-	lines.push("");
-	lines.push("## Best prompt");
-	lines.push(summary.best.prompt);
-	lines.push("");
-	lines.push("## Iteration log");
-	for (const attempt of summary.attempts) {
-		lines.push(
-			`- Iteration ${attempt.iteration}: ${attempt.accepted ? "kept" : "discarded"} | score ${attempt.evaluation.score.toFixed(1)} | compare ${attempt.comparison.winner} | ${attempt.evaluation.summary}`,
-		);
-	}
-	return lines.join("\n");
-}
-
-function buildBenchmarkSummaryMessage(summary: BenchmarkSummary): string {
-	const lines: string[] = [];
-	lines.push("# Prompt benchmark result");
-	lines.push("");
-	lines.push(`Goal: ${summary.goal}`);
-	lines.push(`Runs: ${summary.runs.length}`);
-	lines.push(`Eval cases: ${summary.evalCases.length}`);
-	lines.push(`Mean score: ${summary.meanScore.toFixed(1)}`);
-	lines.push(`Min score: ${summary.minScore.toFixed(1)}`);
-	lines.push(`Max score: ${summary.maxScore.toFixed(1)}`);
-	lines.push(`Variance: ${summary.variance.toFixed(2)}`);
-	lines.push(`Stddev: ${summary.stddev.toFixed(2)}`);
-	lines.push("");
-	lines.push("## Prompt");
-	lines.push(summary.prompt);
-	lines.push("");
-	lines.push("## Runs");
-	for (const run of summary.runs) {
-		lines.push(`- Run ${run.runIndex}: ${run.score.toFixed(1)} | ${run.summary}`);
-	}
-	return lines.join("\n");
-}
-
-interface AutoresearchCallbacks {
-	onProgress?: (message: string) => void;
-	onStateChange?: (patch: Partial<JobSnapshot>) => Promise<void> | void;
-	beforeStep?: () => Promise<void> | void;
-}
-
 async function runAutoresearch(
 	ctx: ExtensionContext,
 	goal: string,
@@ -834,8 +553,7 @@ async function runAutoresearch(
 		} else {
 			callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: discarded candidate (${candidateRun.evaluation.score.toFixed(1)}; compare ${comparison.winner}).`);
 		}
-		const acceptedCount = attempts.filter((attempt) => attempt.accepted).length;
-		const discardedCount = attempts.length - acceptedCount;
+		const { acceptedCount, discardedCount } = countAttemptResults(attempts);
 		await callbacks?.onStateChange?.({
 			currentIteration: iteration,
 			phase: accepted ? "kept-candidate" : "discarded-candidate",
@@ -995,13 +713,12 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 	};
 
 	const shouldPersistPatch = (patch: Partial<JobSnapshot>): boolean => {
-		const persistentPhases = new Set(["iteration-setup", "kept-candidate", "discarded-candidate", "completed"]);
 		return Boolean(
 			patch.status === "paused" ||
 				patch.status === "pause-requested" ||
 				patch.status === "killed" ||
 				patch.status === "failed" ||
-				(patch.phase && persistentPhases.has(patch.phase)) ||
+				(patch.phase && PERSISTENT_PHASES.has(patch.phase)) ||
 				patch.bestPrompt,
 		);
 	};
@@ -1143,8 +860,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 						},
 						activeJob.abortController.signal,
 					);
-					const accepted = summary.attempts.filter((attempt) => attempt.accepted).length;
-					const discarded = summary.attempts.length - accepted;
+					const { acceptedCount: accepted, discardedCount: discarded } = countAttemptResults(summary.attempts);
 					const details: RunToolDetails = { ...summary, acceptedCount: accepted, discardedCount: discarded };
 					if (latestSnapshot) {
 						latestSnapshot = completeSnapshot(latestSnapshot, {
@@ -1349,8 +1065,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				},
 				signal,
 			);
-			const accepted = summary.attempts.filter((attempt) => attempt.accepted).length;
-			const discarded = summary.attempts.length - accepted;
+			const { acceptedCount: accepted, discardedCount: discarded } = countAttemptResults(summary.attempts);
 			const details: RunToolDetails = { ...summary, acceptedCount: accepted, discardedCount: discarded };
 			return {
 				content: [{ type: "text", text: buildRunSummaryMessage(summary) }],

@@ -1,5 +1,22 @@
+import { formatScore } from "./utils.ts";
+
 export type JobStatus = "idle" | "running" | "pause-requested" | "paused" | "completed" | "failed" | "killed";
 export type JobMode = "autoresearch" | "benchmark";
+export type JobPhase =
+	| "starting"
+	| "initial-prompt"
+	| "baseline"
+	| "iteration-setup"
+	| "generate-candidate"
+	| "run-eval-suite"
+	| "score-candidate"
+	| "compare-a-b"
+	| "kept-candidate"
+	| "discarded-candidate"
+	| "early-exit"
+	| "completed"
+	| "killed"
+	| "failed";
 
 export interface JobSnapshot {
 	mode: JobMode;
@@ -12,7 +29,7 @@ export interface JobSnapshot {
 	totalIterations: number;
 	currentCaseIndex: number;
 	totalCases: number;
-	phase: string;
+	phase: JobPhase;
 	message: string;
 	currentCaseTitle?: string;
 	bestPrompt?: string;
@@ -162,7 +179,7 @@ export function failSnapshot(snapshot: JobSnapshot, errorMessage: string, now?: 
 
 export function getStatusText(snapshot: JobSnapshot): string {
 	if (snapshot.status === "running") {
-		return `● autoresearch · iter ${snapshot.currentIteration}/${snapshot.totalIterations} · best ${formatMaybeScore(snapshot.bestScore)}`;
+		return `● autoresearch · iter ${snapshot.currentIteration}/${snapshot.totalIterations} · best ${formatScore(snapshot.bestScore)}`;
 	}
 	if (snapshot.status === "paused") {
 		return `⏸ autoresearch paused · iter ${snapshot.currentIteration}/${snapshot.totalIterations}`;
@@ -171,13 +188,10 @@ export function getStatusText(snapshot: JobSnapshot): string {
 		return "⏸ autoresearch pausing after current step...";
 	}
 	if (snapshot.status === "completed") {
-		return `✓ autoresearch complete · best ${formatMaybeScore(snapshot.bestScore)}`;
+		return `✓ autoresearch complete · best ${formatScore(snapshot.bestScore)}`;
 	}
 	if (snapshot.status === "killed") return "■ autoresearch killed";
 	if (snapshot.status === "failed") return "✗ autoresearch failed";
 	return "";
 }
 
-function formatMaybeScore(value: number | undefined): string {
-	return value === undefined || !Number.isFinite(value) ? "—" : value.toFixed(1);
-}
