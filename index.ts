@@ -36,8 +36,7 @@ import {
 	requestPause,
 	type JobSnapshot,
 } from "./job-state.ts";
-import { PROGRESS_FILE_NAME, PROMPT_FILE_NAME, renderProgressFile } from "./progress-file.ts";
-import { renderPromptFile } from "./prompt-file.ts";
+import { PROMPT_FILE_NAME } from "./prompt-file.ts";
 
 const DEFAULT_ITERATIONS = 10;
 const DEFAULT_EVAL_CASES = 5;
@@ -939,7 +938,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		lines.push(
 			`${theme.fg("muted", "Accepted")}: ${snapshot.acceptedCount}  ${theme.fg("muted", "Discarded")}: ${snapshot.discardedCount}`,
 		);
-		lines.push(theme.fg("dim", `${snapshot.message || "Waiting..."}  ·  files: ${PROGRESS_FILE_NAME}, ${PROMPT_FILE_NAME}`));
+		lines.push(theme.fg("dim", `${snapshot.message || "Waiting..."}  ·  file: ${PROMPT_FILE_NAME}`));
 		return lines.map((line) => truncateToWidth(line, width));
 	};
 
@@ -965,10 +964,10 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		latestSnapshot = { ...snapshot };
 		if (activeJob) activeJob.snapshot = latestSnapshot;
 		pi.appendEntry("prompt-autoresearch-job", latestSnapshot);
-		const progressPath = path.join(ctx.cwd, PROGRESS_FILE_NAME);
-		const promptPath = path.join(ctx.cwd, PROMPT_FILE_NAME);
-		await fs.promises.writeFile(progressPath, renderProgressFile(latestSnapshot, ctx.cwd), "utf-8");
-		await fs.promises.writeFile(promptPath, renderPromptFile(latestSnapshot), "utf-8");
+		if (latestSnapshot.bestPrompt) {
+			const promptPath = path.join(ctx.cwd, PROMPT_FILE_NAME);
+			await fs.promises.writeFile(promptPath, latestSnapshot.bestPrompt.trim() + "\n", "utf-8");
+		}
 	};
 
 	const stopLiveRenderTimer = () => {
