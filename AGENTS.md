@@ -14,15 +14,18 @@ Main behavior:
 - keeps/discards candidates
 - exposes both slash commands and LLM-callable tools
 - provides interactive UI progress for running jobs
+- writes `AUTORESEARCH_PROGRESS.md` in the current working directory during runs for recovery
 
 ## Important files
 
-- `index.ts` — main extension entrypoint
+- `index.ts` — main extension entrypoint and pi runtime wiring
 - `utils.ts` — pure helper utilities; preferred place for small testable logic
 - `job-state.ts` — pure job snapshot / lifecycle transitions
+- `progress-file.ts` — renders `AUTORESEARCH_PROGRESS.md` recovery output
 - `README.md` — user-facing usage docs
 - `test/utils.test.mjs` — tests for helper logic
 - `test/job-state.test.mjs` — tests for job lifecycle/state logic
+- `test/progress-file.test.mjs` — tests for recovery/progress file rendering
 - `package.json` — package metadata and test scripts
 
 ## Commands and tools
@@ -51,6 +54,9 @@ LLM-callable tools:
   - footer/status summary
   - milestone updates in chat
   - background job control for autoresearch
+  - elapsed time / ETA display
+  - current case progress and current case title
+  - recovery progress file kept up to date in cwd
 
 ## Testing
 
@@ -78,6 +84,10 @@ When adding logic:
 - If introducing new state transitions or snapshot fields, update both:
   - `job-state.ts`
   - tests in `test/job-state.test.mjs`
+- If changing recovery file contents or behavior, update both:
+  - `progress-file.ts`
+  - tests in `test/progress-file.test.mjs`
+  - `README.md` if user-visible recovery behavior changed
 
 ## Notes about runtime
 

@@ -13,6 +13,9 @@ import {
   clampProgress,
   parseAutoresearchArgs,
   parseBenchmarkArgs,
+  summarizeGoal,
+  formatDuration,
+  estimateRemainingMs,
 } from '../utils.ts';
 
 test('clamp helpers enforce bounds', () => {
@@ -91,4 +94,24 @@ test('argument parsers understand inline overrides', () => {
     parseBenchmarkArgs('--runs 50 Benchmark this prompt'),
     { runs: 10, goal: 'Benchmark this prompt' },
   );
+});
+
+test('summarizeGoal creates a compact single-line summary', () => {
+  assert.equal(summarizeGoal('  Improve   extraction\nfor   JSON   payloads '), 'Improve extraction for JSON payloads');
+  const long = 'a'.repeat(120);
+  const summary = summarizeGoal(long, 20);
+  assert.equal(summary.length, 20);
+  assert.ok(summary.endsWith('…'));
+});
+
+test('duration and ETA helpers format human-readable timing', () => {
+  assert.equal(formatDuration(undefined), '—');
+  assert.equal(formatDuration(0), '0s');
+  assert.equal(formatDuration(65_000), '1m 5s');
+  assert.equal(formatDuration(3_661_000), '1h 1m 1s');
+
+  assert.equal(estimateRemainingMs(undefined, 0.5), undefined);
+  assert.equal(estimateRemainingMs(10_000, 0), undefined);
+  assert.equal(estimateRemainingMs(10_000, 1), 0);
+  assert.equal(Math.round(estimateRemainingMs(10_000, 0.5)), 10_000);
 });

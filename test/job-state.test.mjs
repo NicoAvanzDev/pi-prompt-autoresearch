@@ -15,6 +15,8 @@ import {
 test('createInitialJobSnapshot builds a running job', () => {
   const snapshot = createInitialJobSnapshot({
     goal: 'Improve summarization',
+    goalSummary: 'Improve summarization',
+    bestPrompt: 'Initial prompt body',
     iterations: 12,
     evalCaseCount: 5,
     now: 123,
@@ -22,6 +24,8 @@ test('createInitialJobSnapshot builds a running job', () => {
 
   assert.equal(snapshot.status, 'running');
   assert.equal(snapshot.goal, 'Improve summarization');
+  assert.equal(snapshot.goalSummary, 'Improve summarization');
+  assert.equal(snapshot.bestPrompt, 'Initial prompt body');
   assert.equal(snapshot.currentIteration, 0);
   assert.equal(snapshot.totalIterations, 12);
   assert.equal(snapshot.totalCases, 5);
@@ -68,6 +72,7 @@ test('complete and fail transitions preserve summary fields', () => {
     acceptedCount: 2,
     discardedCount: 2,
     baselineScore: 50,
+    bestPrompt: 'Best prompt body',
     overallImprovementPct: 82,
   }, 99);
 
@@ -75,6 +80,7 @@ test('complete and fail transitions preserve summary fields', () => {
   assert.equal(completed.phase, 'completed');
   assert.equal(completed.currentIteration, 4);
   assert.equal(completed.bestScore, 91);
+  assert.equal(completed.bestPrompt, 'Best prompt body');
   assert.equal(completed.acceptedCount, 2);
   assert.equal(completed.updatedAt, 99);
   assert.match(completed.message, /Finished\. Best score 91.0/);

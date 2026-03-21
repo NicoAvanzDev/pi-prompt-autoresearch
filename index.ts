@@ -18,6 +18,9 @@ import {
 	parseAutoresearchArgs,
 	parseBenchmarkArgs,
 	variance,
+	summarizeGoal,
+	formatDuration,
+	estimateRemainingMs,
 } from "./utils.ts";
 import {
 	applySnapshotPatch,
@@ -30,9 +33,8 @@ import {
 	resumeSnapshot,
 	requestPause,
 	type JobSnapshot,
-	type JobStatus,
-	type JobMode,
 } from "./job-state.ts";
+import { PROGRESS_FILE_NAME, renderProgressFile } from "./progress-file.ts";
 
 const DEFAULT_ITERATIONS = 10;
 const DEFAULT_EVAL_CASES = 5;
@@ -727,12 +729,13 @@ async function runAutoresearch(
 		undefined,
 		callbacks?.onProgress,
 		signal,
-		async (_evalCase, index, total) => {
+		async (evalCase, index, total) => {
 			await callbacks?.beforeStep?.();
 			await callbacks?.onStateChange?.({
 				phase: "baseline",
 				currentCaseIndex: index,
 				totalCases: total,
+				currentCaseTitle: evalCase.title,
 				message: `Baseline: eval case ${index}/${total}`,
 			});
 		},
@@ -746,7 +749,9 @@ async function runAutoresearch(
 		phase: "iteration-setup",
 		baselineScore: baseline.evaluation.score,
 		bestScore: baseline.evaluation.score,
+		bestPrompt: baseline.prompt,
 		currentScore: baseline.evaluation.score,
+		currentCaseTitle: undefined,
 		overallImprovementPct: 0,
 		message: `Baseline complete (${baseline.evaluation.score.toFixed(1)}).`,
 	});
@@ -758,6 +763,7 @@ async function runAutoresearch(
 			currentIteration: iteration,
 			phase: "generate-candidate",
 			currentCaseIndex: 0,
+			currentCaseTitle: undefined,
 			message: `Iteration ${iteration}/${iterations}: generating candidate...`,
 		});
 		callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: generating candidate...`);
@@ -777,13 +783,14 @@ async function runAutoresearch(
 			best.evaluation.score,
 			callbacks?.onProgress,
 			signal,
-			async (_evalCase, index, total) => {
+			async (evalCase, index, total) => {
 				await callbacks?.beforeStep?.();
 				await callbacks?.onStateChange?.({
 					currentIteration: iteration,
 					phase: "run-eval-suite",
 					currentCaseIndex: index,
 					totalCases: total,
+					currentCaseTitle: evalCase.title,
 					message: `Iteration ${iteration}/${iterations}: eval case ${index}/${total}`,
 				});
 			},
@@ -792,6 +799,7 @@ async function runAutoresearch(
 			currentIteration: iteration,
 			phase: "score-candidate",
 			currentScore: candidateRun.evaluation.score,
+			currentCaseTitle: undefined,
 			message: `Iteration ${iteration}/${iterations}: candidate scored ${candidateRun.evaluation.score.toFixed(1)}.`,
 		});
 
@@ -799,6 +807,7 @@ async function runAutoresearch(
 		await callbacks?.onStateChange?.({
 			currentIteration: iteration,
 			phase: "compare-a-b",
+			currentCaseTitle: undefined,
 			message: `Iteration ${iteration}/${iterations}: blind A/B compare...`,
 		});
 		callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: blind A/B compare...`);
@@ -829,7 +838,9 @@ async function runAutoresearch(
 			phase: accepted ? "kept-candidate" : "discarded-candidate",
 			currentScore: candidateRun.evaluation.score,
 			bestScore: best.evaluation.score,
+			bestPrompt: best.prompt,
 			previousBestScore,
+			currentCaseTitle: undefined,
 			acceptedCount,
 			discardedCount,
 			lastAcceptedGainPct: accepted ? computeRelativeImprovement(best.evaluation.score, previousBestScore) : undefined,
@@ -845,8 +856,10 @@ async function runAutoresearch(
 		currentIteration: iterations,
 		currentCaseIndex: evalCases.length,
 		totalCases: evalCases.length,
+		currentCaseTitle: undefined,
 		currentScore: best.evaluation.score,
 		bestScore: best.evaluation.score,
+		bestPrompt: best.prompt,
 		overallImprovementPct: computeRelativeImprovement(best.evaluation.score, baseline.evaluation.score),
 		message: `Completed ${iterations} iterations. Best score ${best.evaluation.score.toFixed(1)}.`,
 	});
@@ -870,16 +883,27 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		const overallProgress = clampProgress(
 			snapshot.totalIterations > 0 ? snapshot.currentIteration / Math.max(1, snapshot.totalIterations) : 0,
 		);
+		const caseProgressValue = snapshot.totalCases > 0 ? snapshot.currentCaseIndex / Math.max(1, snapshot.totalCases) : 0;
 		const caseProgress = snapshot.totalCases > 0 ? `${snapshot.currentCaseIndex}/${snapshot.totalCases}` : "—";
+		const elapsedMs = snapshot.updatedAt - snapshot.startedAt;
+		const etaMs = estimateRemainingMs(elapsedMs, overallProgress);
 		const lines: string[] = [];
 		lines.push(theme.fg("accent", theme.bold("Prompt autoresearch")));
+		lines.push(`${theme.fg("muted", "Goal")}: ${snapshot.goalSummary ?? summarizeGoal(snapshot.goal)}`);
 		lines.push(
 			`${theme.fg("muted", "Status")}: ${theme.fg(statusColor, snapshot.status)}  ${theme.fg("muted", "Phase")}: ${snapshot.phase || "—"}`,
 		);
 		lines.push(
 			`${theme.fg("muted", "Iteration")}: ${snapshot.currentIteration}/${snapshot.totalIterations}  ${theme.fg("muted", "Case")}: ${caseProgress}`,
 		);
+		lines.push(
+			`${theme.fg("muted", "Elapsed")}: ${formatDuration(elapsedMs)}  ${theme.fg("muted", "ETA")}: ${formatDuration(etaMs)}`,
+		);
 		lines.push(`${theme.fg("muted", "Overall")}: ${theme.fg("accent", makeProgressBar(overallProgress, 24))}`);
+		lines.push(`${theme.fg("muted", "Case progress")}: ${theme.fg("accent", makeProgressBar(caseProgressValue, 16))}`);
+		if (snapshot.currentCaseTitle) {
+			lines.push(`${theme.fg("muted", "Current case")}: ${snapshot.currentCaseTitle}`);
+		}
 		lines.push(
 			`${theme.fg("muted", "Baseline")}: ${formatScore(snapshot.baselineScore)}  ${theme.fg("muted", "Current")}: ${formatScore(snapshot.currentScore)}  ${theme.fg("muted", "Best")}: ${formatScore(snapshot.bestScore)}`,
 		);
@@ -889,7 +913,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		lines.push(
 			`${theme.fg("muted", "Accepted")}: ${snapshot.acceptedCount}  ${theme.fg("muted", "Discarded")}: ${snapshot.discardedCount}`,
 		);
-		lines.push(theme.fg("dim", snapshot.message || "Waiting..."));
+		lines.push(theme.fg("dim", `${snapshot.message || "Waiting..."}  ·  progress file: ${PROGRESS_FILE_NAME}`));
 		return lines;
 	};
 
@@ -907,10 +931,12 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		}));
 	};
 
-	const persistSnapshot = (snapshot: JobSnapshot) => {
+	const persistSnapshot = async (ctx: ExtensionContext, snapshot: JobSnapshot) => {
 		latestSnapshot = { ...snapshot };
 		if (activeJob) activeJob.snapshot = latestSnapshot;
 		pi.appendEntry("prompt-autoresearch-job", latestSnapshot);
+		const progressPath = path.join(ctx.cwd, PROGRESS_FILE_NAME);
+		await fs.promises.writeFile(progressPath, renderProgressFile(latestSnapshot, ctx.cwd), "utf-8");
 	};
 
 	const sendLifecycleMessage = (snapshot: JobSnapshot, kind: string, extra?: Record<string, unknown>) => {
@@ -927,7 +953,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		latestSnapshot = applySnapshotPatch(latestSnapshot, patch);
 		if (activeJob) activeJob.snapshot = latestSnapshot;
 		renderSnapshotIntoUi(ctx, latestSnapshot);
-		if (persist) persistSnapshot(latestSnapshot);
+		if (persist) await persistSnapshot(ctx, latestSnapshot);
 	};
 
 	const waitIfPaused = async (ctx: ExtensionContext) => {
@@ -940,7 +966,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				latestSnapshot = enterPaused(latestSnapshot);
 				if (activeJob) activeJob.snapshot = latestSnapshot;
 				renderSnapshotIntoUi(ctx, latestSnapshot);
-				persistSnapshot(latestSnapshot);
+				await persistSnapshot(ctx, latestSnapshot);
 				sendLifecycleMessage(latestSnapshot, "paused");
 			}
 		}
@@ -1012,6 +1038,8 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 
 			const snapshot: JobSnapshot = createInitialJobSnapshot({
 				goal: parsed.goal,
+				goalSummary: summarizeGoal(parsed.goal),
+				bestPrompt: parsed.goal.trim(),
 				iterations: parsed.iterations,
 				evalCaseCount: DEFAULT_EVAL_CASES,
 			});
@@ -1022,7 +1050,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				paused: false,
 				resumeResolvers: [],
 			};
-			persistSnapshot(snapshot);
+			await persistSnapshot(ctx, snapshot);
 			renderSnapshotIntoUi(ctx, snapshot);
 			sendLifecycleMessage(snapshot, "started");
 			ctx.ui.notify("Autoresearch started in background", "info");
@@ -1066,11 +1094,13 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 							acceptedCount: accepted,
 							discardedCount: discarded,
 							baselineScore: summary.baseline.evaluation.score,
+							bestPrompt: summary.best.prompt,
 							overallImprovementPct: computeRelativeImprovement(summary.best.evaluation.score, summary.baseline.evaluation.score),
+							message: `Finished. Best score ${summary.best.evaluation.score.toFixed(1)}.`,
 						});
 						if (activeJob) activeJob.snapshot = latestSnapshot;
 						renderSnapshotIntoUi(ctx, latestSnapshot);
-						persistSnapshot(latestSnapshot);
+						await persistSnapshot(ctx, latestSnapshot);
 					}
 					if (latestSnapshot) sendLifecycleMessage(latestSnapshot, "completed");
 					pi.sendMessage({
@@ -1090,7 +1120,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 							: failSnapshot(latestSnapshot, message);
 						if (activeJob) activeJob.snapshot = latestSnapshot;
 						renderSnapshotIntoUi(ctx, latestSnapshot);
-						persistSnapshot(latestSnapshot);
+						await persistSnapshot(ctx, latestSnapshot);
 					}
 					if (latestSnapshot) sendLifecycleMessage(latestSnapshot, killed ? "killed" : "failed");
 					ctx.ui.notify(killed ? "Autoresearch killed" : `Autoresearch failed: ${message}`, killed ? "warning" : "error");
@@ -1116,7 +1146,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				latestSnapshot = requestPause(latestSnapshot);
 				if (activeJob) activeJob.snapshot = latestSnapshot;
 				renderSnapshotIntoUi(ctx, latestSnapshot);
-				persistSnapshot(latestSnapshot);
+				await persistSnapshot(ctx, latestSnapshot);
 			}
 			ctx.ui.notify("Pause requested", "info");
 		},
@@ -1137,7 +1167,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				latestSnapshot = resumeSnapshot(latestSnapshot);
 				if (activeJob) activeJob.snapshot = latestSnapshot;
 				renderSnapshotIntoUi(ctx, latestSnapshot);
-				persistSnapshot(latestSnapshot);
+				await persistSnapshot(ctx, latestSnapshot);
 				sendLifecycleMessage(latestSnapshot, "resumed");
 			}
 			for (const resolve of resolvers) resolve();
@@ -1162,7 +1192,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				latestSnapshot = killSnapshot(latestSnapshot);
 				if (activeJob) activeJob.snapshot = latestSnapshot;
 				renderSnapshotIntoUi(ctx, latestSnapshot);
-				persistSnapshot(latestSnapshot);
+				await persistSnapshot(ctx, latestSnapshot);
 			}
 			ctx.ui.notify("Autoresearch kill requested", "warning");
 		},

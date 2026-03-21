@@ -5,6 +5,7 @@ export interface JobSnapshot {
 	mode: JobMode;
 	status: JobStatus;
 	goal: string;
+	goalSummary?: string;
 	iterations: number;
 	evalCaseCount: number;
 	currentIteration: number;
@@ -13,6 +14,8 @@ export interface JobSnapshot {
 	totalCases: number;
 	phase: string;
 	message: string;
+	currentCaseTitle?: string;
+	bestPrompt?: string;
 	baselineScore?: number;
 	currentScore?: number;
 	bestScore?: number;
@@ -27,6 +30,8 @@ export interface JobSnapshot {
 
 export function createInitialJobSnapshot(input: {
 	goal: string;
+	goalSummary?: string;
+	bestPrompt?: string;
 	iterations: number;
 	evalCaseCount: number;
 	now?: number;
@@ -37,6 +42,8 @@ export function createInitialJobSnapshot(input: {
 		mode: input.mode ?? "autoresearch",
 		status: "running",
 		goal: input.goal,
+		goalSummary: input.goalSummary,
+		bestPrompt: input.bestPrompt,
 		iterations: input.iterations,
 		evalCaseCount: input.evalCaseCount,
 		currentIteration: 0,
@@ -114,6 +121,7 @@ export function completeSnapshot(
 		acceptedCount: number;
 		discardedCount: number;
 		baselineScore?: number;
+		bestPrompt?: string;
 		overallImprovementPct?: number;
 		message?: string;
 	},
@@ -130,6 +138,7 @@ export function completeSnapshot(
 			acceptedCount: input.acceptedCount,
 			discardedCount: input.discardedCount,
 			baselineScore: input.baselineScore,
+			bestPrompt: input.bestPrompt,
 			overallImprovementPct: input.overallImprovementPct,
 			message: input.message ?? `Finished. Best score ${input.bestScore.toFixed(1)}.`,
 		},

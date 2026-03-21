@@ -60,3 +60,26 @@ export function parseBenchmarkArgs(rawArgs: string, defaultRuns = 3): { goal: st
 	if (match) return { runs: clampBenchmarkRuns(Number(match[1])), goal: match[2].trim() };
 	return { goal: rawArgs.trim(), runs: defaultRuns };
 }
+
+export function summarizeGoal(goal: string, maxLength = 96): string {
+	const singleLine = goal.replace(/\s+/g, " ").trim();
+	if (singleLine.length <= maxLength) return singleLine;
+	return `${singleLine.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+export function formatDuration(ms: number | undefined): string {
+	if (ms === undefined || !Number.isFinite(ms) || ms < 0) return "—";
+	const totalSeconds = Math.floor(ms / 1000);
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const seconds = totalSeconds % 60;
+	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+	if (minutes > 0) return `${minutes}m ${seconds}s`;
+	return `${seconds}s`;
+}
+
+export function estimateRemainingMs(elapsedMs: number | undefined, progress: number): number | undefined {
+	if (elapsedMs === undefined || !Number.isFinite(elapsedMs) || elapsedMs < 0) return undefined;
+	if (!Number.isFinite(progress) || progress <= 0 || progress >= 1) return progress >= 1 ? 0 : undefined;
+	return (elapsedMs / progress) * (1 - progress);
+}

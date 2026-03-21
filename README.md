@@ -126,8 +126,11 @@ The interactive extension now shows:
 
 - a persistent progress widget above the editor
 - iteration and case progress
+- elapsed time and ETA
 - current score, best score, and percentage improvement vs baseline
 - milestone updates in chat when a new best prompt is found, or when the job is paused/resumed/completed
+
+During a run, the extension also keeps `AUTORESEARCH_PROGRESS.md` updated in the current working directory with the latest best prompt and status so you can recover progress after a crash or power loss.
 
 Pause takes effect at the next safe checkpoint between long-running steps.
 
