@@ -10,6 +10,8 @@ const DEFAULT_ITERATIONS = 10;
 const MAX_ITERATIONS = 100;
 const DEFAULT_EVAL_CASES = 5;
 const MAX_EVAL_CASES = 8;
+const DEFAULT_BENCHMARK_RUNS = 3;
+const MAX_BENCHMARK_RUNS = 10;
 const RESULT_PREVIEW_LIMIT = 1200;
 const HISTORY_PREVIEW_LIMIT = 6;
 
@@ -46,19 +48,59 @@ interface PromptEvaluation {
 	caseEvaluations: CaseEvaluation[];
 }
 
+interface ComparatorCaseDecision {
+	caseId: string;
+	title: string;
+	winner: "A" | "B" | "tie";
+	reason: string;
+}
+
+interface ComparatorResult {
+	winner: "A" | "B" | "tie";
+	keepCandidate: boolean;
+	summary: string;
+	reasons: string[];
+	caseDecisions: ComparatorCaseDecision[];
+}
+
 interface AttemptRecord {
 	iteration: number;
 	candidatePrompt: string;
 	evaluation: PromptEvaluation;
+	comparison: ComparatorResult;
 	accepted: boolean;
 	changeSummary: string;
 	hypothesis: string;
 }
 
+interface PromptOutput {
+	caseId: string;
+	title: string;
+	output: string;
+}
+
 interface PromptRun {
 	prompt: string;
-	outputs: { caseId: string; title: string; output: string }[];
+	outputs: PromptOutput[];
 	evaluation: PromptEvaluation;
+}
+
+interface BenchmarkRun {
+	runIndex: number;
+	score: number;
+	summary: string;
+}
+
+interface BenchmarkSummary {
+	goal: string;
+	prompt: string;
+	evalCases: EvalCase[];
+	runs: BenchmarkRun[];
+	meanScore: number;
+	minScore: number;
+	maxScore: number;
+	variance: number;
+	stddev: number;
 }
 
 interface RunSummary {
@@ -81,6 +123,10 @@ function clampIterations(value: number): number {
 
 function clampEvalCaseCount(value: number): number {
 	return Math.max(3, Math.min(MAX_EVAL_CASES, Math.floor(value)));
+}
+
+function clampBenchmarkRuns(value: number): number {
+	return Math.max(1, Math.min(MAX_BENCHMARK_RUNS, Math.floor(value)));
 }
 
 function shorten(text: string, maxLength = RESULT_PREVIEW_LIMIT): string {
@@ -111,6 +157,17 @@ function asStringArray(value: unknown): string[] {
 	return value.map((item) => String(item));
 }
 
+function mean(values: number[]): number {
+	if (values.length === 0) return 0;
+	return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function variance(values: number[]): number {
+	if (values.length === 0) return 0;
+	const avg = mean(values);
+	return values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / values.length;
+}
+
 function normalizeCaseEvaluation(value: any, fallbackId: string, fallbackTitle: string): CaseEvaluation {
 	const scoreNumber = Number(value?.score);
 	return {
@@ -139,6 +196,28 @@ function normalizePromptEvaluation(value: any, cases: EvalCase[]): PromptEvaluat
 		weaknesses: asStringArray(value?.weaknesses),
 		suggestions: asStringArray(value?.suggestions),
 		caseEvaluations,
+	};
+}
+
+function normalizeComparatorResult(value: any, cases: EvalCase[]): ComparatorResult {
+	const rawCaseDecisions = Array.isArray(value?.caseDecisions) ? value.caseDecisions : [];
+	const caseDecisions = cases.map((evalCase, index) => {
+		const raw = rawCaseDecisions[index] ?? {};
+		const winner = raw?.winner === "A" || raw?.winner === "B" || raw?.winner === "tie" ? raw.winner : "tie";
+		return {
+			caseId: String(raw?.caseId ?? evalCase.id),
+			title: String(raw?.title ?? evalCase.title),
+			winner,
+			reason: String(raw?.reason ?? "No reason provided."),
+		};
+	});
+	const winner = value?.winner === "A" || value?.winner === "B" || value?.winner === "tie" ? value.winner : "tie";
+	return {
+		winner,
+		keepCandidate: winner === "B",
+		summary: String(value?.summary ?? "No summary provided."),
+		reasons: asStringArray(value?.reasons),
+		caseDecisions,
 	};
 }
 
@@ -260,7 +339,9 @@ async function runPiPrompt(
 			proc.on("close", (code) => {
 				if (stdoutBuffer.trim()) handleLine(stdoutBuffer);
 				if (wasAborted) return reject(new Error("Autoresearch run was aborted."));
-				if (code !== 0) return reject(new Error(`pi exited with code ${code}: ${shorten(stderrBuffer || "(no stderr)", 500)}`));
+				if (code !== 0) {
+					return reject(new Error(`pi exited with code ${code}: ${shorten(stderrBuffer || "(no stderr)", 500)}`));
+				}
 				resolve(finalAssistantText.trim());
 			});
 
@@ -289,6 +370,7 @@ function buildHistorySummary(attempts: AttemptRecord[]): string {
 		.map((attempt) => [
 			`Iteration ${attempt.iteration}: ${attempt.accepted ? "accepted" : "discarded"}`,
 			`Score: ${attempt.evaluation.score.toFixed(1)}`,
+			`Comparison winner: ${attempt.comparison.winner}`,
 			`Change: ${attempt.changeSummary}`,
 			`Hypothesis: ${attempt.hypothesis}`,
 			`Evaluation: ${attempt.evaluation.summary}`,
@@ -340,8 +422,8 @@ async function runPromptOnEvalCases(
 	evalCases: EvalCase[],
 	onProgress?: (message: string) => void,
 	signal?: AbortSignal,
-): Promise<{ caseId: string; title: string; output: string }[]> {
-	const outputs: { caseId: string; title: string; output: string }[] = [];
+): Promise<PromptOutput[]> {
+	const outputs: PromptOutput[] = [];
 	for (let i = 0; i < evalCases.length; i++) {
 		const evalCase = evalCases[i];
 		onProgress?.(`Running eval case ${i + 1}/${evalCases.length}: ${evalCase.title}`);
@@ -356,7 +438,7 @@ async function evaluatePromptRun(
 	goal: string,
 	promptUnderTest: string,
 	evalCases: EvalCase[],
-	outputs: { caseId: string; title: string; output: string }[],
+	outputs: PromptOutput[],
 	incumbentScore?: number,
 	signal?: AbortSignal,
 ): Promise<PromptEvaluation> {
@@ -396,6 +478,50 @@ async function evaluatePromptRun(
 	return normalizePromptEvaluation(extractJsonObject(raw), evalCases);
 }
 
+async function comparePromptRuns(
+	ctx: ExtensionContext,
+	goal: string,
+	evalCases: EvalCase[],
+	incumbent: PromptRun,
+	candidate: PromptRun,
+	signal?: AbortSignal,
+): Promise<ComparatorResult> {
+	const systemPrompt = [
+		"You are a blind A/B comparator for prompt optimization.",
+		"Version A is the incumbent. Version B is the candidate.",
+		"Judge outputs case-by-case without bias toward incumbents or novelty.",
+		"Return ONLY valid JSON with this shape:",
+		'{"winner":"A"|"B"|"tie","summary":"string","reasons":["..."],"caseDecisions":[{"caseId":"string","title":"string","winner":"A"|"B"|"tie","reason":"string"}]}',
+		"Choose B only if it is clearly better overall.",
+		"Do not wrap the JSON in markdown fences.",
+	].join("\n");
+	const prompt = [
+		`Goal:\n${goal}`,
+		"",
+		"Compare Version A and Version B across the eval suite.",
+		"Use expected characteristics and actual outputs. Do not prefer longer answers unless they are better.",
+		"",
+		...evalCases.flatMap((evalCase) => {
+			const outputA = incumbent.outputs.find((item) => item.caseId === evalCase.id)?.output ?? "";
+			const outputB = candidate.outputs.find((item) => item.caseId === evalCase.id)?.output ?? "";
+			return [
+				`CASE ${evalCase.id}: ${evalCase.title}`,
+				"Input:",
+				evalCase.input,
+				"Expected characteristics:",
+				evalCase.expectedCharacteristics.map((item) => `- ${item}`).join("\n"),
+				"Version A output:",
+				shorten(outputA, 1200),
+				"Version B output:",
+				shorten(outputB, 1200),
+				"",
+			];
+		}),
+	].join("\n");
+	const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal);
+	return normalizeComparatorResult(extractJsonObject(raw), evalCases);
+}
+
 async function runAndEvaluatePrompt(
 	ctx: ExtensionContext,
 	goal: string,
@@ -410,6 +536,44 @@ async function runAndEvaluatePrompt(
 	return { prompt: promptUnderTest, outputs, evaluation };
 }
 
+async function benchmarkPrompt(
+	ctx: ExtensionContext,
+	goal: string,
+	promptUnderTest: string,
+	evalCases: EvalCase[],
+	runs: number,
+	onProgress?: (message: string) => void,
+	signal?: AbortSignal,
+): Promise<BenchmarkSummary> {
+	const benchmarkRuns: BenchmarkRun[] = [];
+	for (let runIndex = 1; runIndex <= runs; runIndex++) {
+		onProgress?.(`Benchmark run ${runIndex}/${runs}...`);
+		const run = await runAndEvaluatePrompt(
+			ctx,
+			goal,
+			promptUnderTest,
+			evalCases,
+			undefined,
+			(message) => onProgress?.(`Benchmark run ${runIndex}/${runs}: ${message}`),
+			signal,
+		);
+		benchmarkRuns.push({ runIndex, score: run.evaluation.score, summary: run.evaluation.summary });
+	}
+	const scores = benchmarkRuns.map((run) => run.score);
+	const varianceValue = variance(scores);
+	return {
+		goal,
+		prompt: promptUnderTest,
+		evalCases,
+		runs: benchmarkRuns,
+		meanScore: mean(scores),
+		minScore: scores.length ? Math.min(...scores) : 0,
+		maxScore: scores.length ? Math.max(...scores) : 0,
+		variance: varianceValue,
+		stddev: Math.sqrt(varianceValue),
+	};
+}
+
 async function generateCandidate(
 	ctx: ExtensionContext,
 	goal: string,
@@ -422,7 +586,7 @@ async function generateCandidate(
 	const systemPrompt = [
 		"You are an expert prompt optimizer.",
 		"Produce ONE improved prompt candidate for the user's goal.",
-		"Use the eval-suite feedback to address weaknesses across multiple cases.",
+		"Use eval-suite weaknesses and A/B comparison history to address specific failures.",
 		"Return ONLY valid JSON with this shape:",
 		'{"candidatePrompt":"string","changeSummary":"string","hypothesis":"string"}',
 		"Do not wrap the JSON in markdown fences.",
@@ -480,7 +644,32 @@ function buildRunSummaryMessage(summary: RunSummary): string {
 	lines.push("");
 	lines.push("## Iteration log");
 	for (const attempt of summary.attempts) {
-		lines.push(`- Iteration ${attempt.iteration}: ${attempt.accepted ? "kept" : "discarded"} | score ${attempt.evaluation.score.toFixed(1)} | ${attempt.evaluation.summary}`);
+		lines.push(
+			`- Iteration ${attempt.iteration}: ${attempt.accepted ? "kept" : "discarded"} | score ${attempt.evaluation.score.toFixed(1)} | compare ${attempt.comparison.winner} | ${attempt.evaluation.summary}`,
+		);
+	}
+	return lines.join("\n");
+}
+
+function buildBenchmarkSummaryMessage(summary: BenchmarkSummary): string {
+	const lines: string[] = [];
+	lines.push("# Prompt benchmark result");
+	lines.push("");
+	lines.push(`Goal: ${summary.goal}`);
+	lines.push(`Runs: ${summary.runs.length}`);
+	lines.push(`Eval cases: ${summary.evalCases.length}`);
+	lines.push(`Mean score: ${summary.meanScore.toFixed(1)}`);
+	lines.push(`Min score: ${summary.minScore.toFixed(1)}`);
+	lines.push(`Max score: ${summary.maxScore.toFixed(1)}`);
+	lines.push(`Variance: ${summary.variance.toFixed(2)}`);
+	lines.push(`Stddev: ${summary.stddev.toFixed(2)}`);
+	lines.push("");
+	lines.push("## Prompt");
+	lines.push(summary.prompt);
+	lines.push("");
+	lines.push("## Runs");
+	for (const run of summary.runs) {
+		lines.push(`- Run ${run.runIndex}: ${run.score.toFixed(1)} | ${run.summary}`);
 	}
 	return lines.join("\n");
 }
@@ -489,16 +678,14 @@ async function runAutoresearch(
 	ctx: ExtensionContext,
 	goal: string,
 	iterations: number,
+	evalCaseCount: number,
 	onProgress?: (message: string) => void,
 	signal?: AbortSignal,
 ): Promise<RunSummary> {
 	const baselinePrompt = goal.trim();
 	if (!baselinePrompt) throw new Error("Goal cannot be empty.");
 
-	onProgress?.("Generating eval suite...");
-	const evalCases = await generateEvalCases(ctx, goal, DEFAULT_EVAL_CASES, signal);
-
-	onProgress?.("Running baseline across eval suite...");
+	const evalCases = await generateEvalCases(ctx, goal, evalCaseCount, signal);
 	const baseline = await runAndEvaluatePrompt(ctx, goal, baselinePrompt, evalCases, undefined, onProgress, signal);
 	baseline.evaluation.keep = true;
 	baseline.evaluation.decision = "keep";
@@ -521,11 +708,15 @@ async function runAutoresearch(
 			signal,
 		);
 
-		const accepted = candidateRun.evaluation.keep && candidateRun.evaluation.score > best.evaluation.score;
+		onProgress?.(`Iteration ${iteration}/${iterations}: blind A/B compare...`);
+		const comparison = await comparePromptRuns(ctx, goal, evalCases, best, candidateRun, signal);
+		const accepted = candidateRun.evaluation.keep && candidateRun.evaluation.score > best.evaluation.score && comparison.keepCandidate;
+
 		attempts.push({
 			iteration,
 			candidatePrompt: candidate.candidatePrompt,
 			evaluation: candidateRun.evaluation,
+			comparison,
 			accepted,
 			changeSummary: candidate.changeSummary,
 			hypothesis: candidate.hypothesis,
@@ -533,9 +724,9 @@ async function runAutoresearch(
 
 		if (accepted) {
 			best = candidateRun;
-			onProgress?.(`Iteration ${iteration}/${iterations}: kept candidate (${best.evaluation.score.toFixed(1)}).`);
+			onProgress?.(`Iteration ${iteration}/${iterations}: kept candidate (${best.evaluation.score.toFixed(1)}; compare ${comparison.winner}).`);
 		} else {
-			onProgress?.(`Iteration ${iteration}/${iterations}: discarded candidate (${candidateRun.evaluation.score.toFixed(1)}).`);
+			onProgress?.(`Iteration ${iteration}/${iterations}: discarded candidate (${candidateRun.evaluation.score.toFixed(1)}; compare ${comparison.winner}).`);
 		}
 	}
 
@@ -546,6 +737,12 @@ function parseAutoresearchArgs(rawArgs: string, defaultIterations: number): { go
 	const match = rawArgs.match(/^\s*--iterations\s+(\d+)\s+([\s\S]+)$/i);
 	if (match) return { iterations: clampIterations(Number(match[1])), goal: match[2].trim() };
 	return { goal: rawArgs.trim(), iterations: defaultIterations };
+}
+
+function parseBenchmarkArgs(rawArgs: string): { goal: string; runs: number } {
+	const match = rawArgs.match(/^\s*--runs\s+(\d+)\s+([\s\S]+)$/i);
+	if (match) return { runs: clampBenchmarkRuns(Number(match[1])), goal: match[2].trim() };
+	return { goal: rawArgs.trim(), runs: DEFAULT_BENCHMARK_RUNS };
 }
 
 export default function promptAutoresearchExtension(pi: ExtensionAPI) {
@@ -566,7 +763,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 	pi.on("session_tree", async (_event, ctx) => restoreConfig(ctx));
 
 	pi.registerCommand("autoresearch", {
-		description: "Run prompt autoresearch with eval-suite scoring. Usage: /autoresearch [--iterations N] <goal>",
+		description: "Run prompt autoresearch with eval-suite scoring and blind A/B comparison. Usage: /autoresearch [--iterations N] <goal>",
 		handler: async (args, ctx) => {
 			const parsed = parseAutoresearchArgs(args, defaultIterations);
 			if (!parsed.goal) {
@@ -575,7 +772,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 			}
 			ctx.ui.setStatus("prompt-autoresearch", `Running autoresearch (${parsed.iterations} iterations)...`);
 			try {
-				const summary = await runAutoresearch(ctx, parsed.goal, parsed.iterations, (message) => {
+				const summary = await runAutoresearch(ctx, parsed.goal, parsed.iterations, DEFAULT_EVAL_CASES, (message) => {
 					ctx.ui.setStatus("prompt-autoresearch", message);
 				});
 				const accepted = summary.attempts.filter((attempt) => attempt.accepted).length;
@@ -591,6 +788,40 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				if (ctx.hasUI) ctx.ui.setEditorText(summary.best.prompt);
 			} catch (error) {
 				ctx.ui.notify(`Autoresearch failed: ${(error as Error).message}`, "error");
+			} finally {
+				ctx.ui.setStatus("prompt-autoresearch", "");
+			}
+		},
+	});
+
+	pi.registerCommand("autoresearch-benchmark", {
+		description: "Benchmark a prompt across repeated eval-suite runs. Usage: /autoresearch-benchmark [--runs N] <goal>",
+		handler: async (args, ctx) => {
+			const parsed = parseBenchmarkArgs(args);
+			if (!parsed.goal) {
+				ctx.ui.notify("Usage: /autoresearch-benchmark [--runs N] <goal>", "warning");
+				return;
+			}
+			ctx.ui.setStatus("prompt-autoresearch", `Running benchmark (${parsed.runs} runs)...`);
+			try {
+				const evalCases = await generateEvalCases(ctx, parsed.goal, DEFAULT_EVAL_CASES);
+				const benchmark = await benchmarkPrompt(
+					ctx,
+					parsed.goal,
+					parsed.goal.trim(),
+					evalCases,
+					parsed.runs,
+					(message) => ctx.ui.setStatus("prompt-autoresearch", message),
+				);
+				pi.sendMessage({
+					customType: "prompt-autoresearch-benchmark",
+					content: buildBenchmarkSummaryMessage(benchmark),
+					display: true,
+					details: benchmark,
+				});
+				ctx.ui.notify(`Benchmark finished. Mean score: ${benchmark.meanScore.toFixed(1)}`, "success");
+			} catch (error) {
+				ctx.ui.notify(`Benchmark failed: ${(error as Error).message}`, "error");
 			} finally {
 				ctx.ui.setStatus("prompt-autoresearch", "");
 			}
@@ -614,17 +845,19 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "run_prompt_autoresearch",
 		label: "Prompt Autoresearch",
-		description: "Run a fixed-length prompt improvement loop with eval-suite execution, scoring, and keep/discard decisions.",
+		description: "Run prompt improvement with eval-suite execution, scoring, blind A/B comparison, and keep/discard decisions.",
 		promptSnippet: "Improve a prompt over multiple evaluated iterations and return the best prompt found",
 		promptGuidelines: ["Use this tool when the user asks for automatic prompt optimization or iterative prompt improvement."],
 		parameters: Type.Object({
 			goal: Type.String({ description: "The task or outcome the optimized prompt should achieve" }),
 			iterations: Type.Optional(Type.Number({ description: "Iteration count. Default is 10 unless the user configured a higher default." })),
+			evalCases: Type.Optional(Type.Number({ description: "How many eval cases to generate. Default 5, max 8." })),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const iterations = clampIterations(params.iterations ?? defaultIterations);
+			const evalCaseCount = clampEvalCaseCount(params.evalCases ?? DEFAULT_EVAL_CASES);
 			onUpdate?.({ content: [{ type: "text", text: `Running autoresearch (${iterations} iterations)...` }] });
-			const summary = await runAutoresearch(ctx, params.goal, iterations, (message) => {
+			const summary = await runAutoresearch(ctx, params.goal, iterations, evalCaseCount, (message) => {
 				onUpdate?.({ content: [{ type: "text", text: message }] });
 			}, signal);
 			const accepted = summary.attempts.filter((attempt) => attempt.accepted).length;
@@ -667,13 +900,39 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				lines.push("");
 				lines.push(theme.fg("accent", "Iteration log:"));
 				for (const attempt of details.attempts) {
-					lines.push(`- ${attempt.iteration}. ${attempt.accepted ? "kept" : "discarded"} | ${attempt.evaluation.score.toFixed(1)} | ${attempt.evaluation.summary}`);
+					lines.push(`- ${attempt.iteration}. ${attempt.accepted ? "kept" : "discarded"} | ${attempt.evaluation.score.toFixed(1)} | compare ${attempt.comparison.winner} | ${attempt.evaluation.summary}`);
 				}
 			} else if (details.attempts.length > 0) {
 				lines.push("");
 				lines.push(theme.fg("dim", "Expand to inspect the full iteration log."));
 			}
 			return new Text(lines.join("\n"), 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "benchmark_prompt_autoresearch",
+		label: "Benchmark Prompt",
+		description: "Benchmark a prompt over repeated eval-suite runs and report variance.",
+		promptSnippet: "Benchmark a prompt with repeated eval runs and report mean score and variance",
+		promptGuidelines: ["Use this tool when the user asks for benchmark runs, stability, variance, or confidence in prompt quality."],
+		parameters: Type.Object({
+			goal: Type.String({ description: "The prompt or goal to benchmark" }),
+			runs: Type.Optional(Type.Number({ description: "How many benchmark repetitions to run. Default 3, max 10." })),
+			evalCases: Type.Optional(Type.Number({ description: "How many eval cases to generate. Default 5, max 8." })),
+		}),
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const runs = clampBenchmarkRuns(params.runs ?? DEFAULT_BENCHMARK_RUNS);
+			const evalCaseCount = clampEvalCaseCount(params.evalCases ?? DEFAULT_EVAL_CASES);
+			onUpdate?.({ content: [{ type: "text", text: `Running benchmark (${runs} runs)...` }] });
+			const evalCases = await generateEvalCases(ctx, params.goal, evalCaseCount, signal);
+			const benchmark = await benchmarkPrompt(ctx, params.goal, params.goal.trim(), evalCases, runs, (message) => {
+				onUpdate?.({ content: [{ type: "text", text: message }] });
+			}, signal);
+			return {
+				content: [{ type: "text", text: buildBenchmarkSummaryMessage(benchmark) }],
+				details: benchmark,
+			};
 		},
 	});
 }

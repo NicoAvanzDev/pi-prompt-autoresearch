@@ -1,14 +1,13 @@
 # pi prompt autoresearch
 
-A pi extension that improves prompts with a real eval loop:
+A pi extension that improves prompts with a more rigorous eval workflow inspired by the Skill Creator page:
 
 - generates an eval suite
 - runs each prompt candidate across the suite
 - scores the actual outputs case-by-case
-- aggregates the score
+- uses a blind A/B comparator between incumbent and candidate
 - keeps or discards each iteration
-
-That is much closer to a benchmark-style eval workflow than a single one-off judge call.
+- can benchmark repeated runs and report variance
 
 ## Repo layout
 
@@ -44,7 +43,9 @@ From the public git repo:
 pi install git:github.com/NicoAvanzDev/pi-prompt-autoresearch
 ```
 
-## How the eval works
+## How it works
+
+### Improve mode
 
 For each `/autoresearch` run, the extension:
 
@@ -55,9 +56,24 @@ For each `/autoresearch` run, the extension:
 5. generates a revised prompt candidate
 6. runs that candidate on every eval case
 7. evaluates the candidate across the full suite
-8. keeps the candidate only if the eval says `keep` **and** the aggregate score beats the current best
+8. performs a blind **A/B comparison** between incumbent and candidate outputs
+9. keeps the candidate only if:
+   - the eval says `keep`
+   - the aggregate score beats the current best
+   - the blind comparator prefers the candidate
 
-So the keep/discard decision is based on a multi-case eval suite, not just one generated answer.
+### Benchmark mode
+
+The benchmark workflow:
+
+1. generates an eval suite
+2. runs the prompt multiple times across that suite
+3. records per-run aggregate scores
+4. reports:
+   - mean score
+   - min/max score
+   - variance
+   - standard deviation
 
 ## Commands
 
@@ -79,26 +95,53 @@ Override iterations for one run:
 /autoresearch --iterations 20 Write a prompt that generates a JSON API migration checklist.
 ```
 
+### Benchmark a prompt
+
+```text
+/autoresearch-benchmark <goal>
+```
+
+Example:
+
+```text
+/autoresearch-benchmark --runs 5 Write a prompt that extracts structured meeting notes as JSON.
+```
+
 ### Change the default iteration count
 
 ```text
 /autoresearch-iterations 20
 ```
 
-## Tool
+## Tools
 
-The extension exposes an LLM-callable tool:
+The extension exposes LLM-callable tools:
 
 - `run_prompt_autoresearch`
+- `benchmark_prompt_autoresearch`
+
+### `run_prompt_autoresearch`
 
 Parameters:
 
 - `goal: string`
 - `iterations?: number`
+- `evalCases?: number`
+
+### `benchmark_prompt_autoresearch`
+
+Parameters:
+
+- `goal: string`
+- `runs?: number`
+- `evalCases?: number`
 
 ## Notes
 
-- default iterations: **10**
+- default improve iterations: **10**
 - users can increase iterations up to **100**
-- the extension evaluates **actual outputs** on an eval suite
+- default benchmark runs: **3**
+- benchmark runs can go up to **10**
+- default eval cases: **5**
+- eval cases can go up to **8**
 - in interactive mode, `/autoresearch` copies the best prompt into the editor when finished
