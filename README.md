@@ -113,6 +113,24 @@ Example:
 /autoresearch-iterations 20
 ```
 
+### Control a running job
+
+```text
+/autoresearch-pause
+/autoresearch-resume
+/autoresearch-kill
+/autoresearch-status
+```
+
+The interactive extension now shows:
+
+- a persistent progress widget above the editor
+- iteration and case progress
+- current score, best score, and percentage improvement vs baseline
+- milestone updates in chat when a new best prompt is found, or when the job is paused/resumed/completed
+
+Pause takes effect at the next safe checkpoint between long-running steps.
+
 ## Tools
 
 The extension exposes LLM-callable tools:

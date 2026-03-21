@@ -5,13 +5,38 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import {
+	clampBenchmarkRuns,
+	clampEvalCaseCount,
+	clampIterations,
+	clampProgress,
+	computeRelativeImprovement,
+	formatScore,
+	formatSignedPercent,
+	makeProgressBar,
+	mean,
+	parseAutoresearchArgs,
+	parseBenchmarkArgs,
+	variance,
+} from "./utils.ts";
+import {
+	applySnapshotPatch,
+	completeSnapshot,
+	createInitialJobSnapshot,
+	enterPaused,
+	failSnapshot,
+	getStatusText,
+	killSnapshot,
+	resumeSnapshot,
+	requestPause,
+	type JobSnapshot,
+	type JobStatus,
+	type JobMode,
+} from "./job-state.ts";
 
 const DEFAULT_ITERATIONS = 10;
-const MAX_ITERATIONS = 100;
 const DEFAULT_EVAL_CASES = 5;
-const MAX_EVAL_CASES = 8;
 const DEFAULT_BENCHMARK_RUNS = 3;
-const MAX_BENCHMARK_RUNS = 10;
 const RESULT_PREVIEW_LIMIT = 1200;
 const HISTORY_PREVIEW_LIMIT = 6;
 
@@ -117,16 +142,12 @@ interface RunToolDetails extends RunSummary {
 	discardedCount: number;
 }
 
-function clampIterations(value: number): number {
-	return Math.max(1, Math.min(MAX_ITERATIONS, Math.floor(value)));
-}
-
-function clampEvalCaseCount(value: number): number {
-	return Math.max(3, Math.min(MAX_EVAL_CASES, Math.floor(value)));
-}
-
-function clampBenchmarkRuns(value: number): number {
-	return Math.max(1, Math.min(MAX_BENCHMARK_RUNS, Math.floor(value)));
+interface ActiveJob {
+	snapshot: JobSnapshot;
+	abortController: AbortController;
+	pauseRequested: boolean;
+	paused: boolean;
+	resumeResolvers: Array<() => void>;
 }
 
 function shorten(text: string, maxLength = RESULT_PREVIEW_LIMIT): string {
@@ -157,15 +178,8 @@ function asStringArray(value: unknown): string[] {
 	return value.map((item) => String(item));
 }
 
-function mean(values: number[]): number {
-	if (values.length === 0) return 0;
-	return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function variance(values: number[]): number {
-	if (values.length === 0) return 0;
-	const avg = mean(values);
-	return values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / values.length;
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw new Error("Autoresearch run was aborted.");
 }
 
 function normalizeCaseEvaluation(value: any, fallbackId: string, fallbackTitle: string): CaseEvaluation {
@@ -422,10 +436,13 @@ async function runPromptOnEvalCases(
 	evalCases: EvalCase[],
 	onProgress?: (message: string) => void,
 	signal?: AbortSignal,
+	onCaseStart?: (evalCase: EvalCase, index: number, total: number) => Promise<void> | void,
 ): Promise<PromptOutput[]> {
 	const outputs: PromptOutput[] = [];
 	for (let i = 0; i < evalCases.length; i++) {
+		throwIfAborted(signal);
 		const evalCase = evalCases[i];
+		await onCaseStart?.(evalCase, i + 1, evalCases.length);
 		onProgress?.(`Running eval case ${i + 1}/${evalCases.length}: ${evalCase.title}`);
 		const output = await runPiPrompt(ctx, buildExecutionPrompt(promptUnderTest, evalCase), undefined, signal);
 		outputs.push({ caseId: evalCase.id, title: evalCase.title, output });
@@ -530,8 +547,9 @@ async function runAndEvaluatePrompt(
 	incumbentScore: number | undefined,
 	onProgress?: (message: string) => void,
 	signal?: AbortSignal,
+	onCaseStart?: (evalCase: EvalCase, index: number, total: number) => Promise<void> | void,
 ): Promise<PromptRun> {
-	const outputs = await runPromptOnEvalCases(ctx, promptUnderTest, evalCases, onProgress, signal);
+	const outputs = await runPromptOnEvalCases(ctx, promptUnderTest, evalCases, onProgress, signal, onCaseStart);
 	const evaluation = await evaluatePromptRun(ctx, goal, promptUnderTest, evalCases, outputs, incumbentScore, signal);
 	return { prompt: promptUnderTest, outputs, evaluation };
 }
@@ -674,41 +692,117 @@ function buildBenchmarkSummaryMessage(summary: BenchmarkSummary): string {
 	return lines.join("\n");
 }
 
+interface AutoresearchCallbacks {
+	onProgress?: (message: string) => void;
+	onStateChange?: (patch: Partial<JobSnapshot>) => Promise<void> | void;
+	beforeStep?: () => Promise<void> | void;
+}
+
 async function runAutoresearch(
 	ctx: ExtensionContext,
 	goal: string,
 	iterations: number,
 	evalCaseCount: number,
-	onProgress?: (message: string) => void,
+	callbacks?: AutoresearchCallbacks,
 	signal?: AbortSignal,
 ): Promise<RunSummary> {
 	const baselinePrompt = goal.trim();
 	if (!baselinePrompt) throw new Error("Goal cannot be empty.");
 
+	callbacks?.onProgress?.(`Designing eval suite (${evalCaseCount} cases)...`);
+	await callbacks?.beforeStep?.();
 	const evalCases = await generateEvalCases(ctx, goal, evalCaseCount, signal);
-	const baseline = await runAndEvaluatePrompt(ctx, goal, baselinePrompt, evalCases, undefined, onProgress, signal);
+	await callbacks?.onStateChange?.({
+		phase: "baseline",
+		totalCases: evalCases.length,
+		evalCaseCount: evalCases.length,
+		message: `Generated ${evalCases.length} eval cases. Running baseline...`,
+	});
+
+	const baseline = await runAndEvaluatePrompt(
+		ctx,
+		goal,
+		baselinePrompt,
+		evalCases,
+		undefined,
+		callbacks?.onProgress,
+		signal,
+		async (_evalCase, index, total) => {
+			await callbacks?.beforeStep?.();
+			await callbacks?.onStateChange?.({
+				phase: "baseline",
+				currentCaseIndex: index,
+				totalCases: total,
+				message: `Baseline: eval case ${index}/${total}`,
+			});
+		},
+	);
 	baseline.evaluation.keep = true;
 	baseline.evaluation.decision = "keep";
 
 	let best = baseline;
 	const attempts: AttemptRecord[] = [];
+	await callbacks?.onStateChange?.({
+		phase: "iteration-setup",
+		baselineScore: baseline.evaluation.score,
+		bestScore: baseline.evaluation.score,
+		currentScore: baseline.evaluation.score,
+		overallImprovementPct: 0,
+		message: `Baseline complete (${baseline.evaluation.score.toFixed(1)}).`,
+	});
 
 	for (let iteration = 1; iteration <= iterations; iteration++) {
-		onProgress?.(`Iteration ${iteration}/${iterations}: generating candidate...`);
+		throwIfAborted(signal);
+		await callbacks?.beforeStep?.();
+		await callbacks?.onStateChange?.({
+			currentIteration: iteration,
+			phase: "generate-candidate",
+			currentCaseIndex: 0,
+			message: `Iteration ${iteration}/${iterations}: generating candidate...`,
+		});
+		callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: generating candidate...`);
 		const candidate = await generateCandidate(ctx, goal, best.prompt, best.evaluation, evalCases, attempts, signal);
 
-		onProgress?.(`Iteration ${iteration}/${iterations}: running eval suite...`);
+		await callbacks?.beforeStep?.();
+		await callbacks?.onStateChange?.({
+			phase: "run-eval-suite",
+			message: `Iteration ${iteration}/${iterations}: running eval suite...`,
+		});
+		callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: running eval suite...`);
 		const candidateRun = await runAndEvaluatePrompt(
 			ctx,
 			goal,
 			candidate.candidatePrompt,
 			evalCases,
 			best.evaluation.score,
-			onProgress,
+			callbacks?.onProgress,
 			signal,
+			async (_evalCase, index, total) => {
+				await callbacks?.beforeStep?.();
+				await callbacks?.onStateChange?.({
+					currentIteration: iteration,
+					phase: "run-eval-suite",
+					currentCaseIndex: index,
+					totalCases: total,
+					message: `Iteration ${iteration}/${iterations}: eval case ${index}/${total}`,
+				});
+			},
 		);
+		await callbacks?.onStateChange?.({
+			currentIteration: iteration,
+			phase: "score-candidate",
+			currentScore: candidateRun.evaluation.score,
+			message: `Iteration ${iteration}/${iterations}: candidate scored ${candidateRun.evaluation.score.toFixed(1)}.`,
+		});
 
-		onProgress?.(`Iteration ${iteration}/${iterations}: blind A/B compare...`);
+		await callbacks?.beforeStep?.();
+		await callbacks?.onStateChange?.({
+			currentIteration: iteration,
+			phase: "compare-a-b",
+			message: `Iteration ${iteration}/${iterations}: blind A/B compare...`,
+		});
+		callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: blind A/B compare...`);
+		const previousBestScore = best.evaluation.score;
 		const comparison = await comparePromptRuns(ctx, goal, evalCases, best, candidateRun, signal);
 		const accepted = candidateRun.evaluation.keep && candidateRun.evaluation.score > best.evaluation.score && comparison.keepCandidate;
 
@@ -724,43 +818,184 @@ async function runAutoresearch(
 
 		if (accepted) {
 			best = candidateRun;
-			onProgress?.(`Iteration ${iteration}/${iterations}: kept candidate (${best.evaluation.score.toFixed(1)}; compare ${comparison.winner}).`);
+			callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: kept candidate (${best.evaluation.score.toFixed(1)}; compare ${comparison.winner}).`);
 		} else {
-			onProgress?.(`Iteration ${iteration}/${iterations}: discarded candidate (${candidateRun.evaluation.score.toFixed(1)}; compare ${comparison.winner}).`);
+			callbacks?.onProgress?.(`Iteration ${iteration}/${iterations}: discarded candidate (${candidateRun.evaluation.score.toFixed(1)}; compare ${comparison.winner}).`);
 		}
+		const acceptedCount = attempts.filter((attempt) => attempt.accepted).length;
+		const discardedCount = attempts.length - acceptedCount;
+		await callbacks?.onStateChange?.({
+			currentIteration: iteration,
+			phase: accepted ? "kept-candidate" : "discarded-candidate",
+			currentScore: candidateRun.evaluation.score,
+			bestScore: best.evaluation.score,
+			previousBestScore,
+			acceptedCount,
+			discardedCount,
+			lastAcceptedGainPct: accepted ? computeRelativeImprovement(best.evaluation.score, previousBestScore) : undefined,
+			overallImprovementPct: computeRelativeImprovement(best.evaluation.score, baseline.evaluation.score),
+			message: accepted
+				? `Iteration ${iteration}/${iterations}: kept candidate (${best.evaluation.score.toFixed(1)}).`
+				: `Iteration ${iteration}/${iterations}: discarded candidate (${candidateRun.evaluation.score.toFixed(1)}).`,
+		});
 	}
 
+	await callbacks?.onStateChange?.({
+		phase: "completed",
+		currentIteration: iterations,
+		currentCaseIndex: evalCases.length,
+		totalCases: evalCases.length,
+		currentScore: best.evaluation.score,
+		bestScore: best.evaluation.score,
+		overallImprovementPct: computeRelativeImprovement(best.evaluation.score, baseline.evaluation.score),
+		message: `Completed ${iterations} iterations. Best score ${best.evaluation.score.toFixed(1)}.`,
+	});
 	return { goal, iterations, evalCases, baseline, best, attempts };
-}
-
-function parseAutoresearchArgs(rawArgs: string, defaultIterations: number): { goal: string; iterations: number } {
-	const match = rawArgs.match(/^\s*--iterations\s+(\d+)\s+([\s\S]+)$/i);
-	if (match) return { iterations: clampIterations(Number(match[1])), goal: match[2].trim() };
-	return { goal: rawArgs.trim(), iterations: defaultIterations };
-}
-
-function parseBenchmarkArgs(rawArgs: string): { goal: string; runs: number } {
-	const match = rawArgs.match(/^\s*--runs\s+(\d+)\s+([\s\S]+)$/i);
-	if (match) return { runs: clampBenchmarkRuns(Number(match[1])), goal: match[2].trim() };
-	return { goal: rawArgs.trim(), runs: DEFAULT_BENCHMARK_RUNS };
 }
 
 export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 	let defaultIterations = DEFAULT_ITERATIONS;
+	let latestSnapshot: JobSnapshot | null = null;
+	let activeJob: ActiveJob | null = null;
+
+	const buildWidgetLines = (theme: any, snapshot: JobSnapshot): string[] => {
+		const statusColor =
+			snapshot.status === "completed"
+				? "success"
+				: snapshot.status === "failed" || snapshot.status === "killed"
+					? "error"
+					: snapshot.status === "paused" || snapshot.status === "pause-requested"
+						? "warning"
+						: "accent";
+		const overallProgress = clampProgress(
+			snapshot.totalIterations > 0 ? snapshot.currentIteration / Math.max(1, snapshot.totalIterations) : 0,
+		);
+		const caseProgress = snapshot.totalCases > 0 ? `${snapshot.currentCaseIndex}/${snapshot.totalCases}` : "—";
+		const lines: string[] = [];
+		lines.push(theme.fg("accent", theme.bold("Prompt autoresearch")));
+		lines.push(
+			`${theme.fg("muted", "Status")}: ${theme.fg(statusColor, snapshot.status)}  ${theme.fg("muted", "Phase")}: ${snapshot.phase || "—"}`,
+		);
+		lines.push(
+			`${theme.fg("muted", "Iteration")}: ${snapshot.currentIteration}/${snapshot.totalIterations}  ${theme.fg("muted", "Case")}: ${caseProgress}`,
+		);
+		lines.push(`${theme.fg("muted", "Overall")}: ${theme.fg("accent", makeProgressBar(overallProgress, 24))}`);
+		lines.push(
+			`${theme.fg("muted", "Baseline")}: ${formatScore(snapshot.baselineScore)}  ${theme.fg("muted", "Current")}: ${formatScore(snapshot.currentScore)}  ${theme.fg("muted", "Best")}: ${formatScore(snapshot.bestScore)}`,
+		);
+		lines.push(
+			`${theme.fg("muted", "Overall gain")}: ${theme.fg("success", formatSignedPercent(snapshot.overallImprovementPct))}  ${theme.fg("muted", "Last accepted gain")}: ${theme.fg("success", formatSignedPercent(snapshot.lastAcceptedGainPct))}`,
+		);
+		lines.push(
+			`${theme.fg("muted", "Accepted")}: ${snapshot.acceptedCount}  ${theme.fg("muted", "Discarded")}: ${snapshot.discardedCount}`,
+		);
+		lines.push(theme.fg("dim", snapshot.message || "Waiting..."));
+		return lines;
+	};
+
+	const renderSnapshotIntoUi = (ctx: ExtensionContext, snapshot: JobSnapshot | null) => {
+		if (!ctx.hasUI) return;
+		if (!snapshot) {
+			ctx.ui.setStatus("prompt-autoresearch", "");
+			ctx.ui.setWidget("prompt-autoresearch-progress", undefined);
+			return;
+		}
+		ctx.ui.setStatus("prompt-autoresearch", getStatusText(snapshot));
+		ctx.ui.setWidget("prompt-autoresearch-progress", (_tui, theme) => ({
+			render: (_width: number) => buildWidgetLines(theme, snapshot),
+			invalidate: () => {},
+		}));
+	};
+
+	const persistSnapshot = (snapshot: JobSnapshot) => {
+		latestSnapshot = { ...snapshot };
+		if (activeJob) activeJob.snapshot = latestSnapshot;
+		pi.appendEntry("prompt-autoresearch-job", latestSnapshot);
+	};
+
+	const sendLifecycleMessage = (snapshot: JobSnapshot, kind: string, extra?: Record<string, unknown>) => {
+		pi.sendMessage({
+			customType: "prompt-autoresearch-update",
+			content: snapshot.message,
+			display: true,
+			details: { ...snapshot, kind, ...extra },
+		});
+	};
+
+	const updateSnapshot = async (ctx: ExtensionContext, patch: Partial<JobSnapshot>, persist = false) => {
+		if (!latestSnapshot) return;
+		latestSnapshot = applySnapshotPatch(latestSnapshot, patch);
+		if (activeJob) activeJob.snapshot = latestSnapshot;
+		renderSnapshotIntoUi(ctx, latestSnapshot);
+		if (persist) persistSnapshot(latestSnapshot);
+	};
+
+	const waitIfPaused = async (ctx: ExtensionContext) => {
+		if (!activeJob) return;
+		throwIfAborted(activeJob.abortController.signal);
+		if (activeJob.pauseRequested && !activeJob.paused) {
+			activeJob.paused = true;
+			activeJob.pauseRequested = false;
+			if (latestSnapshot) {
+				latestSnapshot = enterPaused(latestSnapshot);
+				if (activeJob) activeJob.snapshot = latestSnapshot;
+				renderSnapshotIntoUi(ctx, latestSnapshot);
+				persistSnapshot(latestSnapshot);
+				sendLifecycleMessage(latestSnapshot, "paused");
+			}
+		}
+		while (activeJob.paused) {
+			await new Promise<void>((resolve) => activeJob?.resumeResolvers.push(resolve));
+			throwIfAborted(activeJob.abortController.signal);
+		}
+	};
 
 	const restoreConfig = (ctx: ExtensionContext) => {
 		defaultIterations = DEFAULT_ITERATIONS;
+		latestSnapshot = null;
 		for (const entry of ctx.sessionManager.getEntries()) {
-			if (entry.type !== "custom" || entry.customType !== "prompt-autoresearch-config") continue;
-			const value = Number((entry.data as any)?.defaultIterations);
-			if (Number.isFinite(value)) defaultIterations = clampIterations(value);
+			if (entry.type !== "custom") continue;
+			if (entry.customType === "prompt-autoresearch-config") {
+				const value = Number((entry.data as any)?.defaultIterations);
+				if (Number.isFinite(value)) defaultIterations = clampIterations(value);
+			}
+			if (entry.customType === "prompt-autoresearch-job") {
+				latestSnapshot = (entry.data as JobSnapshot) ?? latestSnapshot;
+			}
 		}
+		renderSnapshotIntoUi(ctx, latestSnapshot);
 	};
+
+	pi.registerMessageRenderer("prompt-autoresearch-update", (message, _options, theme) => {
+		const details = (message.details ?? {}) as Partial<JobSnapshot> & { kind?: string };
+		const kind = details.kind ?? "update";
+		const color =
+			kind === "failed" || kind === "killed"
+				? "error"
+				: kind === "paused"
+					? "warning"
+					: kind === "improved" || kind === "completed"
+						? "success"
+						: "accent";
+		const lines = [
+			`${theme.fg(color, theme.bold(`[${kind.toUpperCase()}]`))} ${message.content}`,
+			`${theme.fg("muted", "iter")}: ${details.currentIteration ?? 0}/${details.totalIterations ?? 0}  ${theme.fg("muted", "best")}: ${formatScore(details.bestScore)}  ${theme.fg("muted", "gain")}: ${formatSignedPercent(details.overallImprovementPct)}`,
+		];
+		return new Text(lines.join("\n"), 0, 0);
+	});
 
 	pi.on("session_start", async (_event, ctx) => restoreConfig(ctx));
 	pi.on("session_switch", async (_event, ctx) => restoreConfig(ctx));
 	pi.on("session_fork", async (_event, ctx) => restoreConfig(ctx));
 	pi.on("session_tree", async (_event, ctx) => restoreConfig(ctx));
+	pi.on("session_shutdown", async () => {
+		if (!activeJob) return;
+		activeJob.pauseRequested = false;
+		activeJob.paused = false;
+		activeJob.abortController.abort();
+		for (const resolve of activeJob.resumeResolvers) resolve();
+		activeJob.resumeResolvers = [];
+	});
 
 	pi.registerCommand("autoresearch", {
 		description: "Run prompt autoresearch with eval-suite scoring and blind A/B comparison. Usage: /autoresearch [--iterations N] <goal>",
@@ -770,27 +1005,178 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /autoresearch [--iterations N] <goal>", "warning");
 				return;
 			}
-			ctx.ui.setStatus("prompt-autoresearch", `Running autoresearch (${parsed.iterations} iterations)...`);
-			try {
-				const summary = await runAutoresearch(ctx, parsed.goal, parsed.iterations, DEFAULT_EVAL_CASES, (message) => {
-					ctx.ui.setStatus("prompt-autoresearch", message);
-				});
-				const accepted = summary.attempts.filter((attempt) => attempt.accepted).length;
-				const discarded = summary.attempts.length - accepted;
-				const details: RunToolDetails = { ...summary, acceptedCount: accepted, discardedCount: discarded };
-				pi.sendMessage({
-					customType: "prompt-autoresearch-result",
-					content: buildRunSummaryMessage(summary),
-					display: true,
-					details,
-				});
-				ctx.ui.notify(`Autoresearch finished. Best score: ${summary.best.evaluation.score.toFixed(1)}`, "success");
-				if (ctx.hasUI) ctx.ui.setEditorText(summary.best.prompt);
-			} catch (error) {
-				ctx.ui.notify(`Autoresearch failed: ${(error as Error).message}`, "error");
-			} finally {
-				ctx.ui.setStatus("prompt-autoresearch", "");
+			if (activeJob && (activeJob.snapshot.status === "running" || activeJob.snapshot.status === "paused" || activeJob.snapshot.status === "pause-requested")) {
+				ctx.ui.notify("An autoresearch job is already active. Use /autoresearch-pause, /autoresearch-resume, or /autoresearch-kill.", "warning");
+				return;
 			}
+
+			const snapshot: JobSnapshot = createInitialJobSnapshot({
+				goal: parsed.goal,
+				iterations: parsed.iterations,
+				evalCaseCount: DEFAULT_EVAL_CASES,
+			});
+			activeJob = {
+				snapshot,
+				abortController: new AbortController(),
+				pauseRequested: false,
+				paused: false,
+				resumeResolvers: [],
+			};
+			persistSnapshot(snapshot);
+			renderSnapshotIntoUi(ctx, snapshot);
+			sendLifecycleMessage(snapshot, "started");
+			ctx.ui.notify("Autoresearch started in background", "info");
+
+			void (async () => {
+				try {
+					const summary = await runAutoresearch(
+						ctx,
+						parsed.goal,
+						parsed.iterations,
+						DEFAULT_EVAL_CASES,
+						{
+							onProgress: (message) => updateSnapshot(ctx, {
+								status: latestSnapshot?.status === "pause-requested" ? "pause-requested" : activeJob?.paused ? "paused" : "running",
+								message,
+							}),
+							onStateChange: async (patch) => {
+								const previousBest = latestSnapshot?.bestScore;
+								await updateSnapshot(ctx, patch, true);
+								const next = latestSnapshot;
+								if (!next) return;
+								if (patch.status === "paused") return;
+								if (patch.phase === "kept-candidate" && patch.bestScore !== undefined && patch.bestScore !== previousBest) {
+									sendLifecycleMessage(next, "improved", { previousBestScore: previousBest });
+								}
+							},
+							beforeStep: async () => {
+								await waitIfPaused(ctx);
+							},
+						},
+						activeJob.abortController.signal,
+					);
+					const accepted = summary.attempts.filter((attempt) => attempt.accepted).length;
+					const discarded = summary.attempts.length - accepted;
+					const details: RunToolDetails = { ...summary, acceptedCount: accepted, discardedCount: discarded };
+					if (latestSnapshot) {
+						latestSnapshot = completeSnapshot(latestSnapshot, {
+							currentIteration: parsed.iterations,
+							currentScore: summary.best.evaluation.score,
+							bestScore: summary.best.evaluation.score,
+							acceptedCount: accepted,
+							discardedCount: discarded,
+							baselineScore: summary.baseline.evaluation.score,
+							overallImprovementPct: computeRelativeImprovement(summary.best.evaluation.score, summary.baseline.evaluation.score),
+						});
+						if (activeJob) activeJob.snapshot = latestSnapshot;
+						renderSnapshotIntoUi(ctx, latestSnapshot);
+						persistSnapshot(latestSnapshot);
+					}
+					if (latestSnapshot) sendLifecycleMessage(latestSnapshot, "completed");
+					pi.sendMessage({
+						customType: "prompt-autoresearch-result",
+						content: buildRunSummaryMessage(summary),
+						display: true,
+						details,
+					});
+					ctx.ui.notify(`Autoresearch finished. Best score: ${summary.best.evaluation.score.toFixed(1)}`, "success");
+					if (ctx.hasUI) ctx.ui.setEditorText(summary.best.prompt);
+				} catch (error) {
+					const message = (error as Error).message;
+					const killed = activeJob?.abortController.signal.aborted || /aborted/i.test(message);
+					if (latestSnapshot) {
+						latestSnapshot = killed
+							? applySnapshotPatch(latestSnapshot, { status: "killed", phase: "killed", message: "Autoresearch killed." })
+							: failSnapshot(latestSnapshot, message);
+						if (activeJob) activeJob.snapshot = latestSnapshot;
+						renderSnapshotIntoUi(ctx, latestSnapshot);
+						persistSnapshot(latestSnapshot);
+					}
+					if (latestSnapshot) sendLifecycleMessage(latestSnapshot, killed ? "killed" : "failed");
+					ctx.ui.notify(killed ? "Autoresearch killed" : `Autoresearch failed: ${message}`, killed ? "warning" : "error");
+				} finally {
+					if (activeJob) {
+						for (const resolve of activeJob.resumeResolvers) resolve();
+					}
+					activeJob = null;
+				}
+			})();
+		},
+	});
+
+	pi.registerCommand("autoresearch-pause", {
+		description: "Pause the active autoresearch job at the next safe checkpoint",
+		handler: async (_args, ctx) => {
+			if (!activeJob || activeJob.snapshot.status !== "running") {
+				ctx.ui.notify("No running autoresearch job.", "warning");
+				return;
+			}
+			activeJob.pauseRequested = true;
+			if (latestSnapshot) {
+				latestSnapshot = requestPause(latestSnapshot);
+				if (activeJob) activeJob.snapshot = latestSnapshot;
+				renderSnapshotIntoUi(ctx, latestSnapshot);
+				persistSnapshot(latestSnapshot);
+			}
+			ctx.ui.notify("Pause requested", "info");
+		},
+	});
+
+	pi.registerCommand("autoresearch-resume", {
+		description: "Resume a paused autoresearch job",
+		handler: async (_args, ctx) => {
+			if (!activeJob || !activeJob.paused) {
+				ctx.ui.notify("No paused autoresearch job.", "warning");
+				return;
+			}
+			activeJob.paused = false;
+			activeJob.pauseRequested = false;
+			const resolvers = [...activeJob.resumeResolvers];
+			activeJob.resumeResolvers = [];
+			if (latestSnapshot) {
+				latestSnapshot = resumeSnapshot(latestSnapshot);
+				if (activeJob) activeJob.snapshot = latestSnapshot;
+				renderSnapshotIntoUi(ctx, latestSnapshot);
+				persistSnapshot(latestSnapshot);
+				sendLifecycleMessage(latestSnapshot, "resumed");
+			}
+			for (const resolve of resolvers) resolve();
+			ctx.ui.notify("Autoresearch resumed", "success");
+		},
+	});
+
+	pi.registerCommand("autoresearch-kill", {
+		description: "Kill the active autoresearch job",
+		handler: async (_args, ctx) => {
+			if (!activeJob) {
+				ctx.ui.notify("No active autoresearch job.", "warning");
+				return;
+			}
+			activeJob.pauseRequested = false;
+			activeJob.paused = false;
+			activeJob.abortController.abort();
+			const resolvers = [...activeJob.resumeResolvers];
+			activeJob.resumeResolvers = [];
+			for (const resolve of resolvers) resolve();
+			if (latestSnapshot) {
+				latestSnapshot = killSnapshot(latestSnapshot);
+				if (activeJob) activeJob.snapshot = latestSnapshot;
+				renderSnapshotIntoUi(ctx, latestSnapshot);
+				persistSnapshot(latestSnapshot);
+			}
+			ctx.ui.notify("Autoresearch kill requested", "warning");
+		},
+	});
+
+	pi.registerCommand("autoresearch-status", {
+		description: "Show the current autoresearch job status",
+		handler: async (_args, ctx) => {
+			if (!latestSnapshot) {
+				ctx.ui.notify("No autoresearch job has run in this session yet.", "info");
+				return;
+			}
+			renderSnapshotIntoUi(ctx, latestSnapshot);
+			ctx.ui.notify(`Autoresearch ${latestSnapshot.status}: ${latestSnapshot.message}`, "info");
 		},
 	});
 
@@ -798,6 +1184,10 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		description: "Benchmark a prompt across repeated eval-suite runs. Usage: /autoresearch-benchmark [--runs N] <goal>",
 		handler: async (args, ctx) => {
 			const parsed = parseBenchmarkArgs(args);
+			if (activeJob && (activeJob.snapshot.status === "running" || activeJob.snapshot.status === "paused" || activeJob.snapshot.status === "pause-requested")) {
+				ctx.ui.notify("Finish or stop the active autoresearch job before starting a benchmark.", "warning");
+				return;
+			}
 			if (!parsed.goal) {
 				ctx.ui.notify("Usage: /autoresearch-benchmark [--runs N] <goal>", "warning");
 				return;
@@ -823,7 +1213,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 			} catch (error) {
 				ctx.ui.notify(`Benchmark failed: ${(error as Error).message}`, "error");
 			} finally {
-				ctx.ui.setStatus("prompt-autoresearch", "");
+				renderSnapshotIntoUi(ctx, latestSnapshot);
 			}
 		},
 	});
@@ -857,9 +1247,18 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 			const iterations = clampIterations(params.iterations ?? defaultIterations);
 			const evalCaseCount = clampEvalCaseCount(params.evalCases ?? DEFAULT_EVAL_CASES);
 			onUpdate?.({ content: [{ type: "text", text: `Running autoresearch (${iterations} iterations)...` }] });
-			const summary = await runAutoresearch(ctx, params.goal, iterations, evalCaseCount, (message) => {
-				onUpdate?.({ content: [{ type: "text", text: message }] });
-			}, signal);
+			const summary = await runAutoresearch(
+				ctx,
+				params.goal,
+				iterations,
+				evalCaseCount,
+				{
+					onProgress: (message) => {
+						onUpdate?.({ content: [{ type: "text", text: message }] });
+					},
+				},
+				signal,
+			);
 			const accepted = summary.attempts.filter((attempt) => attempt.accepted).length;
 			const discarded = summary.attempts.length - accepted;
 			const details: RunToolDetails = { ...summary, acceptedCount: accepted, discardedCount: discarded };
