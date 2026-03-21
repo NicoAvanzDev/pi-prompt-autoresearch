@@ -131,12 +131,7 @@ The interactive extension now shows:
 - current score, best score, and percentage improvement vs baseline
 - milestone updates in chat when a new best prompt is found, or when the job is paused/resumed/completed
 
-During a run, the extension also keeps these files updated in the current working directory:
-
-- `AUTORESEARCH_PROGRESS.md` — status, metrics, recovery notes
-- `AUTORESEARCH_PROMPT.md` — the current best prompt, updated as the search progresses
-
-This way the user can see prompt evolution live, and still recover progress after a crash or power loss.
+During a run, the extension writes `AUTORESEARCH_PROMPT.md` in the current working directory with the raw best prompt text, updated at each iteration. Progress state is kept internal to the extension (pi session entries and the live UI widget).
 
 Pause takes effect at the next safe checkpoint between long-running steps.
 
