@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import {
 	clampBenchmarkRuns,
@@ -34,7 +34,8 @@ import {
 	requestPause,
 	type JobSnapshot,
 } from "./job-state.ts";
-import { PROGRESS_FILE_NAME, renderProgressFile } from "./progress-file.ts";
+import { PROGRESS_FILE_NAME, PROMPT_FILE_NAME, renderProgressFile } from "./progress-file.ts";
+import { renderPromptFile } from "./prompt-file.ts";
 
 const DEFAULT_ITERATIONS = 10;
 const DEFAULT_EVAL_CASES = 5;
@@ -392,6 +393,22 @@ function buildHistorySummary(attempts: AttemptRecord[]): string {
 			`Evaluation: ${attempt.evaluation.summary}`,
 		].join("\n"))
 		.join("\n\n");
+}
+
+async function generateGoalSummary(ctx: ExtensionContext, goal: string, signal?: AbortSignal): Promise<string> {
+	const systemPrompt = [
+		"You summarize prompt-optimization goals for a terminal UI.",
+		"Return exactly one concise sentence fragment, max 100 characters if possible.",
+		"Do not use markdown, bullets, quotes, or labels.",
+	].join("\n");
+	const prompt = [`Goal to summarize:`, goal].join("\n");
+	try {
+		const raw = await runPiPrompt(ctx, prompt, systemPrompt, signal);
+		const cleaned = raw.replace(/\s+/g, " ").trim().replace(/^[-*\"']+|[-*\"']+$/g, "");
+		return summarizeGoal(cleaned || goal);
+	} catch {
+		return summarizeGoal(goal);
+	}
 }
 
 async function generateEvalCases(
@@ -871,7 +888,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 	let latestSnapshot: JobSnapshot | null = null;
 	let activeJob: ActiveJob | null = null;
 
-	const buildWidgetLines = (theme: any, snapshot: JobSnapshot): string[] => {
+	const buildWidgetLines = (theme: any, snapshot: JobSnapshot, width: number): string[] => {
 		const statusColor =
 			snapshot.status === "completed"
 				? "success"
@@ -913,8 +930,8 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		lines.push(
 			`${theme.fg("muted", "Accepted")}: ${snapshot.acceptedCount}  ${theme.fg("muted", "Discarded")}: ${snapshot.discardedCount}`,
 		);
-		lines.push(theme.fg("dim", `${snapshot.message || "Waiting..."}  ·  progress file: ${PROGRESS_FILE_NAME}`));
-		return lines;
+		lines.push(theme.fg("dim", `${snapshot.message || "Waiting..."}  ·  files: ${PROGRESS_FILE_NAME}, ${PROMPT_FILE_NAME}`));
+		return lines.map((line) => truncateToWidth(line, width));
 	};
 
 	const renderSnapshotIntoUi = (ctx: ExtensionContext, snapshot: JobSnapshot | null) => {
@@ -926,7 +943,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		}
 		ctx.ui.setStatus("prompt-autoresearch", getStatusText(snapshot));
 		ctx.ui.setWidget("prompt-autoresearch-progress", (_tui, theme) => ({
-			render: (_width: number) => buildWidgetLines(theme, snapshot),
+			render: (width: number) => buildWidgetLines(theme, snapshot, width),
 			invalidate: () => {},
 		}));
 	};
@@ -936,7 +953,9 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 		if (activeJob) activeJob.snapshot = latestSnapshot;
 		pi.appendEntry("prompt-autoresearch-job", latestSnapshot);
 		const progressPath = path.join(ctx.cwd, PROGRESS_FILE_NAME);
+		const promptPath = path.join(ctx.cwd, PROMPT_FILE_NAME);
 		await fs.promises.writeFile(progressPath, renderProgressFile(latestSnapshot, ctx.cwd), "utf-8");
+		await fs.promises.writeFile(promptPath, renderPromptFile(latestSnapshot), "utf-8");
 	};
 
 	const sendLifecycleMessage = (snapshot: JobSnapshot, kind: string, extra?: Record<string, unknown>) => {
@@ -946,6 +965,18 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 			display: true,
 			details: { ...snapshot, kind, ...extra },
 		});
+	};
+
+	const shouldPersistPatch = (patch: Partial<JobSnapshot>): boolean => {
+		const persistentPhases = new Set(["iteration-setup", "kept-candidate", "discarded-candidate", "completed"]);
+		return Boolean(
+			patch.status === "paused" ||
+				patch.status === "pause-requested" ||
+				patch.status === "killed" ||
+				patch.status === "failed" ||
+				(patch.phase && persistentPhases.has(patch.phase)) ||
+				patch.bestPrompt,
+		);
 	};
 
 	const updateSnapshot = async (ctx: ExtensionContext, patch: Partial<JobSnapshot>, persist = false) => {
@@ -1036,9 +1067,10 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			const goalSummary = await generateGoalSummary(ctx, parsed.goal);
 			const snapshot: JobSnapshot = createInitialJobSnapshot({
 				goal: parsed.goal,
-				goalSummary: summarizeGoal(parsed.goal),
+				goalSummary,
 				bestPrompt: parsed.goal.trim(),
 				iterations: parsed.iterations,
 				evalCaseCount: DEFAULT_EVAL_CASES,
@@ -1069,7 +1101,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
 							}),
 							onStateChange: async (patch) => {
 								const previousBest = latestSnapshot?.bestScore;
-								await updateSnapshot(ctx, patch, true);
+								await updateSnapshot(ctx, patch, shouldPersistPatch(patch));
 								const next = latestSnapshot;
 								if (!next) return;
 								if (patch.status === "paused") return;

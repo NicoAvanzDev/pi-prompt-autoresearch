@@ -14,7 +14,7 @@ Main behavior:
 - keeps/discards candidates
 - exposes both slash commands and LLM-callable tools
 - provides interactive UI progress for running jobs
-- writes `AUTORESEARCH_PROGRESS.md` in the current working directory during runs for recovery
+- writes `AUTORESEARCH_PROGRESS.md` and `AUTORESEARCH_PROMPT.md` in the current working directory during runs for recovery and live visibility
 
 ## Important files
 
@@ -22,10 +22,12 @@ Main behavior:
 - `utils.ts` — pure helper utilities; preferred place for small testable logic
 - `job-state.ts` — pure job snapshot / lifecycle transitions
 - `progress-file.ts` — renders `AUTORESEARCH_PROGRESS.md` recovery output
+- `prompt-file.ts` — renders `AUTORESEARCH_PROMPT.md` with the current best prompt
 - `README.md` — user-facing usage docs
 - `test/utils.test.mjs` — tests for helper logic
 - `test/job-state.test.mjs` — tests for job lifecycle/state logic
 - `test/progress-file.test.mjs` — tests for recovery/progress file rendering
+- `test/prompt-file.test.mjs` — tests for live prompt file rendering
 - `package.json` — package metadata and test scripts
 
 ## Commands and tools
@@ -51,6 +53,7 @@ LLM-callable tools:
 - Keep interactive UI changes concise and readable; this extension values a clean TUI.
 - Preserve current UX:
   - progress widget above editor
+  - AI-generated goal summary in the widget
   - footer/status summary
   - milestone updates in chat
   - background job control for autoresearch

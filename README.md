@@ -125,12 +125,18 @@ Example:
 The interactive extension now shows:
 
 - a persistent progress widget above the editor
+- an AI-generated goal summary
 - iteration and case progress
 - elapsed time and ETA
 - current score, best score, and percentage improvement vs baseline
 - milestone updates in chat when a new best prompt is found, or when the job is paused/resumed/completed
 
-During a run, the extension also keeps `AUTORESEARCH_PROGRESS.md` updated in the current working directory with the latest best prompt and status so you can recover progress after a crash or power loss.
+During a run, the extension also keeps these files updated in the current working directory:
+
+- `AUTORESEARCH_PROGRESS.md` — status, metrics, recovery notes
+- `AUTORESEARCH_PROMPT.md` — the current best prompt, updated as the search progresses
+
+This way the user can see prompt evolution live, and still recover progress after a crash or power loss.
 
 Pause takes effect at the next safe checkpoint between long-running steps.
 

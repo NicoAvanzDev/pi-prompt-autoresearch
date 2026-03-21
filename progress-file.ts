@@ -2,6 +2,7 @@ import type { JobSnapshot } from './job-state.ts';
 import { formatScore, formatSignedPercent, summarizeGoal } from './utils.ts';
 
 export const PROGRESS_FILE_NAME = 'AUTORESEARCH_PROGRESS.md';
+export const PROMPT_FILE_NAME = 'AUTORESEARCH_PROMPT.md';
 
 export function renderProgressFile(snapshot: JobSnapshot, cwd: string): string {
 	const lines: string[] = [];
