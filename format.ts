@@ -1,5 +1,6 @@
 import type { AttemptRecord, BenchmarkSummary, EvalCase, RunSummary } from "./types.ts";
 import { countAttemptResults, shorten } from "./normalize.ts";
+import { PROMPT_FILE_NAME } from "./prompt-file.ts";
 
 const HISTORY_PREVIEW_LIMIT = 6;
 
@@ -56,8 +57,7 @@ export function buildRunSummaryMessage(summary: RunSummary): string {
     lines.push(`- ${evalCase.title}: ${caseEval?.score.toFixed(1) ?? "0.0"}`);
   }
   lines.push("");
-  lines.push("## Best prompt");
-  lines.push(summary.best.prompt);
+  lines.push(`Best prompt saved to \`${PROMPT_FILE_NAME}\``);
   lines.push("");
   lines.push("## Iteration log");
   for (const attempt of summary.attempts) {
@@ -80,9 +80,6 @@ export function buildBenchmarkSummaryMessage(summary: BenchmarkSummary): string 
   lines.push(`Max score: ${summary.maxScore.toFixed(1)}`);
   lines.push(`Variance: ${summary.variance.toFixed(2)}`);
   lines.push(`Stddev: ${summary.stddev.toFixed(2)}`);
-  lines.push("");
-  lines.push("## Prompt");
-  lines.push(summary.prompt);
   lines.push("");
   lines.push("## Runs");
   for (const run of summary.runs) {

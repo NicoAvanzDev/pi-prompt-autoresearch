@@ -1279,9 +1279,6 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
         ),
       );
       lines.push("");
-      lines.push(theme.fg("accent", "Best prompt:"));
-      lines.push(expanded ? details.best.prompt : shorten(details.best.prompt, 300));
-      lines.push("");
       lines.push(theme.fg("accent", "Eval suite:"));
       for (const evalCase of details.evalCases) {
         const caseEval = details.best.evaluation.caseEvaluations.find(
