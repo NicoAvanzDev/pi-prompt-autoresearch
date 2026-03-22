@@ -4,6 +4,7 @@ import {
   shorten,
   trimJsonFence,
   extractJsonObject,
+  repairJson,
   asStringArray,
   throwIfAborted,
   normalizeCaseEvaluation,
@@ -81,6 +82,57 @@ describe("extractJsonObject", () => {
 
   it("throws on non-JSON text", () => {
     expect(() => extractJsonObject("not json at all")).toThrow(/Could not parse JSON/);
+  });
+
+  it("recovers from trailing commas", () => {
+    expect(extractJsonObject('{"key":"value",}')).toEqual({ key: "value" });
+  });
+
+  it("recovers from single-quoted strings", () => {
+    expect(extractJsonObject("{'key':'value'}")).toEqual({ key: "value" });
+  });
+
+  it("recovers from single-line JS comments", () => {
+    expect(extractJsonObject('// here is the JSON\n{"key":"value"}')).toEqual({ key: "value" });
+  });
+
+  it("recovers from nested trailing commas", () => {
+    expect(extractJsonObject('{"items":["a","b",],"count":2,}')).toEqual({
+      items: ["a", "b"],
+      count: 2,
+    });
+  });
+
+  it("handles single-quoted strings containing double quotes", () => {
+    expect(extractJsonObject("{'key':'say \"hello\"'}")).toEqual({ key: 'say "hello"' });
+  });
+});
+
+describe("repairJson", () => {
+  it("removes trailing commas before } and ]", () => {
+    expect(JSON.parse(repairJson('{"a":1,}'))).toEqual({ a: 1 });
+    expect(JSON.parse(repairJson('{"a":[1,2,]}'))).toEqual({ a: [1, 2] });
+  });
+
+  it("converts single quotes to double quotes", () => {
+    expect(JSON.parse(repairJson("{'a':'b'}"))).toEqual({ a: "b" });
+  });
+
+  it("escapes double quotes inside converted single-quoted strings", () => {
+    expect(JSON.parse(repairJson("{'a':'he said \"hi\"'}"))).toEqual({ a: 'he said "hi"' });
+  });
+
+  it("strips single-line comments", () => {
+    expect(JSON.parse(repairJson('// comment\n{"a":1}'))).toEqual({ a: 1 });
+  });
+
+  it("escapes literal newlines inside strings", () => {
+    expect(JSON.parse(repairJson('{"a":"line1\nline2"}'))).toEqual({ a: "line1\nline2" });
+  });
+
+  it("leaves already-valid JSON unchanged", () => {
+    const valid = '{"key":"value","num":42}';
+    expect(JSON.parse(repairJson(valid))).toEqual({ key: "value", num: 42 });
   });
 });
 

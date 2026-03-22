@@ -26,19 +26,101 @@ export function trimJsonFence(text: string): string {
   return text.trim();
 }
 
+/**
+ * Attempt light repairs on malformed JSON strings commonly produced by LLMs.
+ * Handles: trailing commas, single-quoted strings, unescaped control characters,
+ * single-line JS comments, and unescaped newlines inside strings.
+ */
+export function repairJson(text: string): string {
+  // Strip single-line JS comments (// ...) that are not inside strings.
+  // Simple heuristic: only remove comments at start of a line or after whitespace.
+  let result = text.replace(/^\s*\/\/.*$/gm, "");
+
+  // Replace single-quoted strings with double-quoted strings.
+  // Handles: {'key': 'value'} -> {"key": "value"}
+  // We walk the string character by character to avoid breaking already-valid double-quoted strings.
+  const chars: string[] = [];
+  let inDouble = false;
+  let inSingle = false;
+  for (let i = 0; i < result.length; i++) {
+    const ch = result[i];
+    const prev = i > 0 ? result[i - 1] : "";
+    if (ch === '"' && !inSingle && prev !== "\\") {
+      inDouble = !inDouble;
+      chars.push(ch);
+    } else if (ch === "'" && !inDouble && prev !== "\\") {
+      if (!inSingle) {
+        inSingle = true;
+        chars.push('"');
+      } else {
+        inSingle = false;
+        chars.push('"');
+      }
+    } else if (inSingle && ch === '"') {
+      // Escape double quotes that appear inside a single-quoted string
+      chars.push('\\"');
+    } else {
+      chars.push(ch);
+    }
+  }
+  result = chars.join("");
+
+  // Remove trailing commas before } or ]
+  result = result.replace(/,\s*([}\]])/g, "$1");
+
+  // Replace unescaped control characters inside strings (tabs, newlines).
+  // Walk through and fix control chars only inside quoted strings.
+  const out: string[] = [];
+  let inStr = false;
+  for (let i = 0; i < result.length; i++) {
+    const ch = result[i];
+    const prev = i > 0 ? result[i - 1] : "";
+    if (ch === '"' && prev !== "\\") {
+      inStr = !inStr;
+      out.push(ch);
+    } else if (inStr) {
+      if (ch === "\n") out.push("\\n");
+      else if (ch === "\r") out.push("\\r");
+      else if (ch === "\t") out.push("\\t");
+      else out.push(ch);
+    } else {
+      out.push(ch);
+    }
+  }
+  return out.join("");
+}
+
 /** Parse a JSON object from potentially messy model output. */
 export function extractJsonObject(text: string): unknown {
   const cleaned = trimJsonFence(text);
+
+  // First try: direct parse of cleaned text.
   try {
     return JSON.parse(cleaned);
   } catch {
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
-    throw new Error(
-      `Could not parse JSON from model output:\n${shorten(cleaned, SHORTEN_FALLBACK_LIMIT)}`,
-    );
+    // ignore
   }
+
+  // Second try: extract outermost { … } and parse.
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  const sliced = start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
+  try {
+    return JSON.parse(sliced);
+  } catch {
+    // ignore
+  }
+
+  // Third try: apply lightweight JSON repair then parse.
+  try {
+    return JSON.parse(repairJson(sliced));
+  } catch {
+    // ignore
+  }
+
+  throw new Error(
+    `Could not parse JSON from model output:\n${shorten(cleaned, SHORTEN_FALLBACK_LIMIT)}`,
+  );
 }
 
 /** Coerce an unknown value to a string array, discarding non-array input. */

@@ -99,9 +99,11 @@ async function runPiPrompt(
   const options: Record<string, unknown> = { apiKey, signal };
   if (maxTokens !== undefined) options.maxTokens = maxTokens;
 
+  const resolvedSystemPrompt = systemPrompt?.trim() || "Follow the user instructions.";
+
   const response = await complete(
     model,
-    { systemPrompt: systemPrompt?.trim() || undefined, messages: [userMessage] },
+    { systemPrompt: resolvedSystemPrompt, messages: [userMessage] },
     options,
   );
 
@@ -203,7 +205,7 @@ async function runPromptOnEvalCases(
     const output = await runPiPrompt(
       ctx,
       buildExecutionPrompt(promptUnderTest, evalCase),
-      undefined,
+      "You are being evaluated. Apply the prompt under test to the provided input faithfully.",
       signal,
     );
     results[i] = { caseId: evalCase.id, title: evalCase.title, output };
