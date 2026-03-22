@@ -27,70 +27,15 @@ export function trimJsonFence(text: string): string {
 }
 
 /**
- * Attempt light repairs on malformed JSON strings commonly produced by LLMs.
- * Handles: trailing commas, single-quoted strings, unescaped control characters,
- * single-line JS comments, and unescaped newlines inside strings.
+ * Parse a JSON object from model output.
+ *
+ * Handles two common formatting quirks that don't alter content:
+ * 1. Markdown code fences (via {@link trimJsonFence}).
+ * 2. Surrounding commentary text (extract outermost `{ … }`).
+ *
+ * Any structurally invalid JSON is rejected outright so the caller can
+ * regenerate from scratch rather than risk losing the model's real intent.
  */
-export function repairJson(text: string): string {
-  // Strip single-line JS comments (// ...) that are not inside strings.
-  // Simple heuristic: only remove comments at start of a line or after whitespace.
-  let result = text.replace(/^\s*\/\/.*$/gm, "");
-
-  // Replace single-quoted strings with double-quoted strings.
-  // Handles: {'key': 'value'} -> {"key": "value"}
-  // We walk the string character by character to avoid breaking already-valid double-quoted strings.
-  const chars: string[] = [];
-  let inDouble = false;
-  let inSingle = false;
-  for (let i = 0; i < result.length; i++) {
-    const ch = result[i];
-    const prev = i > 0 ? result[i - 1] : "";
-    if (ch === '"' && !inSingle && prev !== "\\") {
-      inDouble = !inDouble;
-      chars.push(ch);
-    } else if (ch === "'" && !inDouble && prev !== "\\") {
-      if (!inSingle) {
-        inSingle = true;
-        chars.push('"');
-      } else {
-        inSingle = false;
-        chars.push('"');
-      }
-    } else if (inSingle && ch === '"') {
-      // Escape double quotes that appear inside a single-quoted string
-      chars.push('\\"');
-    } else {
-      chars.push(ch);
-    }
-  }
-  result = chars.join("");
-
-  // Remove trailing commas before } or ]
-  result = result.replace(/,\s*([}\]])/g, "$1");
-
-  // Replace unescaped control characters inside strings (tabs, newlines).
-  // Walk through and fix control chars only inside quoted strings.
-  const out: string[] = [];
-  let inStr = false;
-  for (let i = 0; i < result.length; i++) {
-    const ch = result[i];
-    const prev = i > 0 ? result[i - 1] : "";
-    if (ch === '"' && prev !== "\\") {
-      inStr = !inStr;
-      out.push(ch);
-    } else if (inStr) {
-      if (ch === "\n") out.push("\\n");
-      else if (ch === "\r") out.push("\\r");
-      else if (ch === "\t") out.push("\\t");
-      else out.push(ch);
-    } else {
-      out.push(ch);
-    }
-  }
-  return out.join("");
-}
-
-/** Parse a JSON object from potentially messy model output. */
 export function extractJsonObject(text: string): unknown {
   const cleaned = trimJsonFence(text);
 
@@ -104,18 +49,12 @@ export function extractJsonObject(text: string): unknown {
   // Second try: extract outermost { … } and parse.
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
-  const sliced = start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
-  try {
-    return JSON.parse(sliced);
-  } catch {
-    // ignore
-  }
-
-  // Third try: apply lightweight JSON repair then parse.
-  try {
-    return JSON.parse(repairJson(sliced));
-  } catch {
-    // ignore
+  if (start >= 0 && end > start) {
+    try {
+      return JSON.parse(cleaned.slice(start, end + 1));
+    } catch {
+      // ignore
+    }
   }
 
   throw new Error(

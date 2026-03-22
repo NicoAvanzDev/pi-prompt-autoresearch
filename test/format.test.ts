@@ -161,8 +161,9 @@ describe("buildRunSummaryMessage", () => {
     expect(result).toContain("Discarded: 1");
     expect(result).toContain("## Eval suite");
     expect(result).toContain("Case 1: 85.0");
-    expect(result).toContain("## Best prompt");
-    expect(result).toContain("improved");
+    expect(result).toContain("AUTORESEARCH_PROMPT.md");
+    expect(result).not.toContain("## Best prompt");
+    expect(result).not.toContain("improved");
     expect(result).toContain("## Iteration log");
     expect(result).toContain("Iteration 1: kept");
     expect(result).toContain("Iteration 2: discarded");
@@ -197,8 +198,8 @@ describe("buildBenchmarkSummaryMessage", () => {
     expect(result).toContain("Max score: 85.0");
     expect(result).toContain("Variance: 16.67");
     expect(result).toContain("Stddev: 4.08");
-    expect(result).toContain("## Prompt");
-    expect(result).toContain("Be consistent");
+    expect(result).not.toContain("## Prompt");
+    expect(result).not.toContain("Be consistent");
     expect(result).toContain("## Runs");
     expect(result).toContain("Run 1: 80.0 | Good run");
     expect(result).toContain("Run 3: 85.0 | Great run");
