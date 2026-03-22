@@ -1,46 +1,80 @@
 # pi prompt autoresearch
 
-A pi extension that improves prompts with a more rigorous eval workflow inspired by the Skill Creator page:
+[![npm version](https://img.shields.io/npm/v/pi-prompt-autoresearch)](https://www.npmjs.com/package/pi-prompt-autoresearch)
+[![license](https://img.shields.io/npm/l/pi-prompt-autoresearch)](./LICENSE)
 
-- generates an eval suite
-- runs each prompt candidate across the suite
-- scores the actual outputs case-by-case
-- uses a blind A/B comparator between incumbent and candidate
-- keeps or discards each iteration
-- can benchmark repeated runs and report variance
+A [pi](https://github.com/nichochar/pi) extension that **iteratively improves prompts** using execution-based evaluation, blind A/B comparison, and keep/discard decisions.
 
-## Repo layout
+- Generates an eval suite from your goal
+- Runs each prompt candidate across the suite and scores actual outputs
+- Performs blind A/B comparisons between incumbent and candidate
+- Keeps or discards each iteration based on eval scores and comparator preference
+- Benchmarks repeated runs and reports variance
 
-- `index.ts` — the pi extension entrypoint
-- `package.json` — pi package manifest
-- `README.md`
-- `.gitignore`
-- `LICENSE`
-
-## Load locally
-
-```bash
-pi --no-extensions -e ./index.ts
-```
-
-## Install as a pi package
-
-From a local path:
-
-```bash
-pi install .
-```
-
-From npm after publishing:
+## Install
 
 ```bash
 pi install npm:pi-prompt-autoresearch
 ```
 
+<details>
+<summary>Alternative install methods</summary>
+
 From the public git repo:
 
 ```bash
 pi install git:github.com/NicoAvanzDev/pi-prompt-autoresearch
+```
+
+From a local clone:
+
+```bash
+pi install .
+```
+
+Load without installing:
+
+```bash
+pi --no-extensions -e ./index.ts
+```
+
+</details>
+
+## Quick start
+
+```text
+/autoresearch Write a prompt that produces a concise, factual summary of a long technical article.
+```
+
+That single command kicks off the full optimization loop. The extension will:
+
+1. Generate an initial prompt from your goal
+2. Build an eval suite tailored to the task
+3. Iterate — rewrite, evaluate, compare, keep or discard — for 10 rounds (configurable)
+4. Write the best prompt to `AUTORESEARCH_PROMPT.md` in your working directory
+
+A live progress widget shows iteration count, scores, elapsed time, and ETA while it runs. When a new best prompt is found you get a milestone update in chat.
+
+### Example session
+
+```text
+> /autoresearch Write a prompt that turns raw meeting transcripts into structured JSON notes with attendees, action items, and decisions.
+
+  Autoresearch ━━━━━━━━━━━━━━━━━━━━ 100%  10/10 iterations
+  Goal    Turn meeting transcripts into structured JSON notes
+  Score   0.92 (best) — +38% vs baseline
+  Status  Completed in 4m 12s
+
+✓ Best prompt written to AUTORESEARCH_PROMPT.md
+```
+
+You can also benchmark an existing prompt to measure consistency:
+
+```text
+> /autoresearch-benchmark --runs 5 Write a prompt that extracts structured meeting notes as JSON.
+
+  Benchmark complete — 5 runs
+  Mean 0.88 · Min 0.84 · Max 0.91 · StdDev 0.03
 ```
 
 ## How it works
