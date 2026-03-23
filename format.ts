@@ -2,6 +2,8 @@ import type { AttemptRecord, BenchmarkSummary, EvalCase, RunSummary } from "./ty
 import { countAttemptResults, shorten } from "./normalize.ts";
 import { PROMPT_FILE_NAME } from "./prompt-file.ts";
 
+import { computeRelativeImprovement, formatSignedPercent } from "./utils.ts";
+
 const HISTORY_PREVIEW_LIMIT = 6;
 
 export function buildHistorySummary(attempts: AttemptRecord[]): string {
@@ -46,6 +48,11 @@ export function buildRunSummaryMessage(summary: RunSummary): string {
   lines.push(`Eval cases: ${summary.evalCases.length}`);
   lines.push(`Baseline score: ${summary.baseline.evaluation.score.toFixed(1)}`);
   lines.push(`Best score: ${summary.best.evaluation.score.toFixed(1)}`);
+  const improvementPct = computeRelativeImprovement(
+    summary.best.evaluation.score,
+    summary.baseline.evaluation.score,
+  );
+  lines.push(`Improvement over baseline: ${formatSignedPercent(improvementPct)}`);
   lines.push(`Accepted: ${acceptedCount}`);
   lines.push(`Discarded: ${discardedCount}`);
   lines.push("");

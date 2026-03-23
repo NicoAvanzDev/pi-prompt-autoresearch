@@ -23,6 +23,7 @@ import {
   summarizeGoal,
   formatDuration,
   estimateRemainingMs,
+  statusColor,
 } from "./utils.ts";
 import {
   applySnapshotPatch,
@@ -697,14 +698,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
   let lastUiContext: ExtensionContext | null = null;
 
   const buildWidgetLines = (theme: any, snapshot: JobSnapshot, width: number): string[] => {
-    const statusColor =
-      snapshot.status === "completed"
-        ? "success"
-        : snapshot.status === "failed" || snapshot.status === "killed"
-          ? "error"
-          : snapshot.status === "paused" || snapshot.status === "pause-requested"
-            ? "warning"
-            : "accent";
+    const statusCol = statusColor(snapshot.status);
     const overallProgress = clampProgress(
       snapshot.totalIterations > 0
         ? snapshot.currentIteration / Math.max(1, snapshot.totalIterations)
@@ -726,7 +720,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
       `${theme.fg("muted", "Goal")}: ${snapshot.goalSummary ?? summarizeGoal(snapshot.goal)}`,
     );
     lines.push(
-      `${theme.fg("muted", "Status")}: ${theme.fg(statusColor, snapshot.status)}  ${theme.fg("muted", "Phase")}: ${snapshot.phase || "—"}`,
+      `${theme.fg("muted", "Status")}: ${theme.fg(statusCol, snapshot.status)}  ${theme.fg("muted", "Phase")}: ${snapshot.phase || "—"}`,
     );
     lines.push(
       `${theme.fg("muted", "Iteration")}: ${snapshot.currentIteration}/${snapshot.totalIterations}  ${theme.fg("muted", "Case")}: ${caseProgress}`,
@@ -881,19 +875,26 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer("prompt-autoresearch-update", (message, _options, theme) => {
     const details = (message.details ?? {}) as Partial<JobSnapshot> & { kind?: string };
     const kind = details.kind ?? "update";
-    const color =
-      kind === "failed" || kind === "killed"
-        ? "error"
-        : kind === "paused"
-          ? "warning"
-          : kind === "improved" || kind === "completed"
-            ? "success"
-            : "accent";
-    const lines = [
+    const color = statusColor(kind);
+    const lines: string[] = [
       `${theme.fg(color, theme.bold(`[${kind.toUpperCase()}]`))} ${message.content}`,
-      `${theme.fg("muted", "iter")}: ${details.currentIteration ?? 0}/${details.totalIterations ?? 0}  ${theme.fg("muted", "best")}: ${formatScore(details.bestScore)}  ${theme.fg("muted", "best gain")}: ${formatSignedPercent(details.overallImprovementPct)}`,
-      `${theme.fg("muted", "current vs best")}: ${formatSignedPercent(details.currentCandidateVsBestPct)}  ${theme.fg("muted", "current vs baseline")}: ${formatSignedPercent(details.currentCandidateVsBaselinePct)}`,
     ];
+    if (kind === "completed") {
+      lines.push(
+        `${theme.fg("muted", "baseline")}: ${formatScore(details.baselineScore)}  ${theme.fg("muted", "best")}: ${formatScore(details.bestScore)}  ${theme.fg("muted", "improvement")}: ${theme.fg("success", formatSignedPercent(details.overallImprovementPct))}`,
+      );
+      lines.push(
+        `${theme.fg("muted", "iterations")}: ${details.currentIteration ?? 0}/${details.totalIterations ?? 0}  ${theme.fg("muted", "accepted")}: ${details.acceptedCount ?? 0}  ${theme.fg("muted", "discarded")}: ${details.discardedCount ?? 0}`,
+      );
+      lines.push(theme.fg("muted", `prompt saved to ${PROMPT_FILE_NAME}`));
+    } else {
+      lines.push(
+        `${theme.fg("muted", "iter")}: ${details.currentIteration ?? 0}/${details.totalIterations ?? 0}  ${theme.fg("muted", "best")}: ${formatScore(details.bestScore)}  ${theme.fg("muted", "best gain")}: ${formatSignedPercent(details.overallImprovementPct)}`,
+      );
+      lines.push(
+        `${theme.fg("muted", "current vs best")}: ${formatSignedPercent(details.currentCandidateVsBestPct)}  ${theme.fg("muted", "current vs baseline")}: ${formatSignedPercent(details.currentCandidateVsBaselinePct)}`,
+      );
+    }
     return new Text(lines.join("\n"), 0, 0);
   });
 
@@ -1011,7 +1012,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
                 summary.best.evaluation.score,
                 summary.baseline.evaluation.score,
               ),
-              message: `Finished. Best score ${summary.best.evaluation.score.toFixed(1)}.`,
+              message: `Finished. Best score ${summary.best.evaluation.score.toFixed(1)} (${formatSignedPercent(computeRelativeImprovement(summary.best.evaluation.score, summary.baseline.evaluation.score))} over baseline).`,
             });
             if (activeJob) activeJob.snapshot = latestSnapshot;
             renderSnapshotIntoUi(ctx, latestSnapshot);
@@ -1024,11 +1025,18 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
             display: true,
             details,
           });
+          const improvementPct = computeRelativeImprovement(
+            summary.best.evaluation.score,
+            summary.baseline.evaluation.score,
+          );
+          const improvementStr =
+            improvementPct !== undefined && Number.isFinite(improvementPct)
+              ? ` (${formatSignedPercent(improvementPct)} over baseline)`
+              : "";
           ctx.ui.notify(
-            `Autoresearch finished. Best score: ${summary.best.evaluation.score.toFixed(1)}`,
+            `Autoresearch finished. Best score: ${summary.best.evaluation.score.toFixed(1)}${improvementStr}`,
             "success",
           );
-          if (ctx.hasUI) ctx.ui.setEditorText(summary.best.prompt);
         } catch (error) {
           const message = (error as Error).message;
           const killed = activeJob?.abortController.signal.aborted || /aborted/i.test(message);
