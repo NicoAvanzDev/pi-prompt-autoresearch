@@ -131,3 +131,16 @@ export function shouldSkipComparison(
   if (!candidateKeep) return true;
   return candidateScore < bestScore - threshold;
 }
+
+const STATUS_COLORS: Record<string, string> = {
+  completed: "success",
+  improved: "success",
+  failed: "error",
+  killed: "error",
+  paused: "warning",
+  "pause-requested": "warning",
+};
+
+export function statusColor(status: string): string {
+  return STATUS_COLORS[status] ?? "accent";
+}

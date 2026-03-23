@@ -18,6 +18,7 @@ import {
   countConsecutiveDiscards,
   earlyExitThreshold,
   shouldSkipComparison,
+  statusColor,
 } from "../utils.ts";
 
 describe("clamp helpers", () => {
@@ -174,5 +175,22 @@ describe("shouldSkipComparison", () => {
     // Custom threshold
     expect(shouldSkipComparison(55, 60, true, 3)).toBe(true);
     expect(shouldSkipComparison(58, 60, true, 3)).toBe(false);
+  });
+});
+
+describe("statusColor", () => {
+  it("maps known statuses to the correct color", () => {
+    expect(statusColor("completed")).toBe("success");
+    expect(statusColor("improved")).toBe("success");
+    expect(statusColor("failed")).toBe("error");
+    expect(statusColor("killed")).toBe("error");
+    expect(statusColor("paused")).toBe("warning");
+    expect(statusColor("pause-requested")).toBe("warning");
+  });
+
+  it("returns accent for unknown statuses", () => {
+    expect(statusColor("running")).toBe("accent");
+    expect(statusColor("unknown")).toBe("accent");
+    expect(statusColor("")).toBe("accent");
   });
 });
