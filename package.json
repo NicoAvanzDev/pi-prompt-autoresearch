@@ -1,6 +1,6 @@
 {
   "name": "pi-prompt-autoresearch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A pi extension that iteratively improves prompts with execution-based evaluation and keep/discard decisions.",
   "keywords": [
     "autoresearch",
