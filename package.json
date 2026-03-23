@@ -33,9 +33,9 @@
     "build": "echo 'nothing to build'",
     "test": "vitest run",
     "lint": "oxlint",
-    "fmt": "oxfmt .",
-    "fmt:check": "oxfmt --check .",
-    "check": "vitest run && oxlint && oxfmt --check .",
+    "fmt": "oxfmt \"**/*.ts\"",
+    "fmt:check": "oxfmt --check \"**/*.ts\"",
+    "check": "vitest run && oxlint && oxfmt --check \"**/*.ts\"",
     "prepublishOnly": "npm pack --dry-run"
   },
   "devDependencies": {
