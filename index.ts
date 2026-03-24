@@ -495,7 +495,9 @@ async function runAutoresearch(
     message: `Baseline complete (${baseline.evaluation.score.toFixed(1)}).`,
   });
 
+  let completedIterations = 0;
   for (let iteration = 1; iteration <= iterations; iteration++) {
+    completedIterations = iteration;
     throwIfAborted(signal);
     await callbacks?.beforeStep?.();
     await callbacks?.onStateChange?.({
@@ -669,7 +671,7 @@ async function runAutoresearch(
 
   await callbacks?.onStateChange?.({
     phase: "completed",
-    currentIteration: iterations,
+    currentIteration: completedIterations,
     currentCaseIndex: evalCases.length,
     totalCases: evalCases.length,
     currentCaseTitle: undefined,
@@ -685,9 +687,9 @@ async function runAutoresearch(
       best.evaluation.score,
       baseline.evaluation.score,
     ),
-    message: `Completed ${iterations} iterations. Best score ${best.evaluation.score.toFixed(1)}.`,
+    message: `Completed ${completedIterations}/${iterations} iterations. Best score ${best.evaluation.score.toFixed(1)}.`,
   });
-  return { goal, iterations, evalCases, baseline, best, attempts };
+  return { goal, iterations: completedIterations, evalCases, baseline, best, attempts };
 }
 
 export default function promptAutoresearchExtension(pi: ExtensionAPI) {
@@ -1001,7 +1003,7 @@ export default function promptAutoresearchExtension(pi: ExtensionAPI) {
           };
           if (latestSnapshot) {
             latestSnapshot = completeSnapshot(latestSnapshot, {
-              currentIteration: parsed.iterations,
+              currentIteration: summary.iterations,
               currentScore: summary.best.evaluation.score,
               bestScore: summary.best.evaluation.score,
               acceptedCount: accepted,
