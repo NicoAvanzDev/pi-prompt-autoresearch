@@ -88,7 +88,31 @@ async function runPiPrompt(
 ): Promise<string> {
   const model = ctx.model;
   if (!model) throw new Error("No model available. Select a model before running autoresearch.");
-  const apiKey = await ctx.modelRegistry.getApiKey(model);
+
+  let apiKey: string | undefined = undefined;
+  let headers: Record<string, string> | undefined = undefined;
+  const modelRegistry = ctx.modelRegistry as unknown as {
+    getApiKeyAndHeaders?: (model: typeof model) => Promise<{
+      ok: boolean;
+      apiKey?: string;
+      headers?: Record<string, string>;
+      error?: string;
+    }>;
+    getApiKeyForProvider?: (provider: string) => Promise<string | undefined>;
+    getApiKey?: (provider: string) => Promise<string | undefined>;
+  };
+
+  if (typeof modelRegistry.getApiKeyAndHeaders === "function") {
+    const auth = await modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth.ok) throw new Error(auth.error ?? `No API key for ${model.provider}/${model.id}.`);
+    apiKey = auth.apiKey;
+    headers = auth.headers;
+  } else if (typeof modelRegistry.getApiKeyForProvider === "function") {
+    apiKey = await modelRegistry.getApiKeyForProvider(model.provider);
+  } else if (typeof modelRegistry.getApiKey === "function") {
+    apiKey = await modelRegistry.getApiKey(model.provider);
+  }
+
   if (!apiKey) throw new Error(`No API key for ${model.provider}/${model.id}.`);
 
   const userMessage: UserMessage = {
@@ -98,6 +122,7 @@ async function runPiPrompt(
   };
 
   const options: Record<string, unknown> = { apiKey, signal };
+  if (headers) options.headers = headers;
   if (maxTokens !== undefined) options.maxTokens = maxTokens;
 
   const resolvedSystemPrompt = systemPrompt?.trim() || "Follow the user instructions.";
